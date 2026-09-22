@@ -1,7 +1,12 @@
 // app.js — Musashi IV Control Panel Client
 
 document.addEventListener('DOMContentLoaded', () => {
-    const socket = io();
+    let socket = null;
+    if (typeof io !== 'undefined') {
+        socket = io();
+    } else {
+        console.warn('Socket.IO library not loaded; realtime updates disabled.');
+    }
 
     // DOM Elements - Status & Header
     const realtimeClock = document.getElementById('realtime-clock');
@@ -453,40 +458,39 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // Socket.IO Handlers
-    socket.on('connect', () => {
-        appendLog('[SYSTEM] Socket.IO connection established with Musashi IV server.');
-    });
+    if (socket) {
+        socket.on('connect', () => {
+            appendLog('[SYSTEM] Socket.IO connection established with Musashi IV server.');
+        });
 
-    socket.on('status_change', (data) => {
-        updateRunningStatus(data.is_running, data.mode);
-    });
+        socket.on('status_change', (data) => {
+            updateRunningStatus(data.is_running, data.mode);
+        });
 
-    socket.on('stats_update', (data) => {
-        updateStatsUI(data);
-    });
+        socket.on('stats_update', (data) => {
+            updateStatsUI(data);
+        });
 
-    socket.on('log_line', (data) => {
-        if (data && data.data) {
-            appendLog(data.data);
-        }
-    });
+        socket.on('log_line', (data) => {
+            if (data && data.data) {
+                appendLog(data.data);
+            }
+        });
 
-    socket.on('log_update', (data) => {
-        if (data && data.log) {
-            appendLog(data.log);
-        }
-    });
+        socket.on('log_update', (data) => {
+            if (data && data.log) {
+                appendLog(data.log);
+            }
+        });
+    }
 
     function resolveBackLink() {
         const backLink = document.querySelector('.back-link');
         if (backLink) {
+            const protocol = window.location.protocol || 'http:';
             const hostname = window.location.hostname || 'localhost';
-            const targetUrl = `http://${hostname}:8080`;
+            const targetUrl = `${protocol}//${hostname}:8080`;
             backLink.setAttribute('href', targetUrl);
-            backLink.addEventListener('click', (e) => {
-                e.preventDefault();
-                window.location.href = targetUrl;
-            });
         }
     }
     resolveBackLink();

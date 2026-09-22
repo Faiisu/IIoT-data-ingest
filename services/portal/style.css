@@ -26,6 +26,10 @@
     
     --glow-sky: 0 0 15px rgba(14, 165, 233, 0.25);
     --glow-emerald: 0 0 15px rgba(16, 185, 129, 0.3);
+
+    /* Clean font stacks for air-gapped LAN edge environments */
+    --font-sans: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', 'SF Mono', Monaco, 'Cascadia Code', 'Segoe UI Mono', Menlo, Consolas, 'Liberation Mono', monospace;
 }
 
 * {
@@ -53,7 +57,7 @@
 body {
     background-color: var(--bg-main);
     color: var(--text-primary);
-    font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-family: var(--font-sans);
     min-height: 100vh;
     display: flex;
     justify-content: center;
@@ -78,7 +82,7 @@ body::before {
 }
 
 .monospace {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
 }
 
 /* Dashboard Container */
@@ -199,11 +203,11 @@ body::before {
     font-weight: 800;
     letter-spacing: 0.08em;
     color: var(--accent-emerald);
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
 }
 
 .clock-display {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     font-size: 0.85rem;
     color: var(--accent-sky);
     background: rgba(14, 165, 233, 0.05);
@@ -404,7 +408,7 @@ body::before {
     align-items: center;
     gap: 0.4rem;
     font-size: 0.68rem;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     font-weight: 700;
     padding: 0.2rem 0.6rem;
     border-radius: 4px;
@@ -412,14 +416,16 @@ body::before {
     letter-spacing: 0.05em;
 }
 
-.badge-active {
+.badge-active,
+.badge-online {
     background-color: rgba(16, 185, 129, 0.06);
     color: var(--accent-emerald);
     border: 1px solid rgba(16, 185, 129, 0.25);
     box-shadow: 0 0 8px rgba(16, 185, 129, 0.05);
 }
 
-.badge-active .badge-dot {
+.badge-active .badge-dot,
+.badge-online .badge-dot {
     background-color: var(--accent-emerald);
     width: 5px;
     height: 5px;
@@ -541,12 +547,12 @@ body::before {
 .log-indicator {
     font-size: 0.62rem;
     color: var(--text-secondary);
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     letter-spacing: 0.05em;
 }
 
 .console-body {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     font-size: 0.75rem;
     padding: 1rem 1.5rem;
     display: flex;
@@ -621,7 +627,7 @@ body::before {
     padding: 0.85rem 1.5rem;
     color: #ffffff;
     font-size: 0.78rem;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     font-weight: 600;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6), 0 0 15px rgba(14, 165, 233, 0.15);
     opacity: 0;

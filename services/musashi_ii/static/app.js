@@ -2,13 +2,35 @@
 // Musashi II Control Panel Frontend Logic
 
 document.addEventListener('DOMContentLoaded', () => {
-    const socket = io();
+    // Dynamic Backlink Resolution
+    function resolveBackLink() {
+        const backLink = document.querySelector('.back-link');
+        if (backLink) {
+            const protocol = window.location.protocol || 'http:';
+            const hostname = window.location.hostname || 'localhost';
+            const targetUrl = `${protocol}//${hostname}:8080`;
+            backLink.setAttribute('href', targetUrl);
+        }
+    }
+    resolveBackLink();
+
+    // Guarded Socket.IO Initialization
+    let socket = null;
+    if (typeof io !== 'undefined') {
+        socket = io();
+    } else {
+        console.warn('Socket.IO library not loaded; realtime updates disabled.');
+    }
+
+    // Constant limits
+    const MAX_LOG_LINES = 500;
 
     // DOM Elements - Status & Header
     const realtimeClock = document.getElementById('realtime-clock');
     const statusIndicator = document.getElementById('system-status-indicator');
     const statusDot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
+    const logIndicator = document.getElementById('log-indicator');
 
     // DOM Elements - Telemetry Cards
     const elPolled = document.getElementById('telemetry-polled');
@@ -63,13 +85,45 @@ document.addEventListener('DOMContentLoaded', () => {
         const hrs = String(now.getHours()).padStart(2, '0');
         const mins = String(now.getMinutes()).padStart(2, '0');
         const secs = String(now.getSeconds()).padStart(2, '0');
-        realtimeClock.textContent = `${hrs}:${mins}:${secs}`;
+        if (realtimeClock) {
+            realtimeClock.textContent = `${hrs}:${mins}:${secs}`;
+        }
     }
     setInterval(updateClock, 1000);
     updateClock();
 
+    // Reset telemetry metrics when process is offline or disconnected
+    function resetTelemetry() {
+        if (elPolled) elPolled.textContent = '0';
+        if (elPressure) elPressure.textContent = '0.0';
+        if (elTime) elTime.textContent = '0';
+        if (elVacuum) elVacuum.textContent = '0.00';
+        if (elMode) elMode.textContent = '--';
+        if (elProduct) elProduct.textContent = '--';
+    }
+
+    // Set UI to disconnected state (red dot, disabled actions, reset telemetry)
+    function setDisconnectedState() {
+        if (statusDot) {
+            statusDot.className = 'pulse-dot offline';
+        }
+        if (statusText) {
+            statusText.textContent = 'DISCONNECTED';
+        }
+        if (logIndicator) {
+            logIndicator.textContent = 'DISCONNECTED';
+            logIndicator.classList.add('text-error');
+        }
+        if (btnStartReal) btnStartReal.disabled = true;
+        if (btnStartMock) btnStartMock.disabled = true;
+        if (btnStop) btnStop.disabled = true;
+
+        resetTelemetry();
+    }
+
     // Toggle Postgres vs InfluxDB vs SQLite Form Fields
     function updateDbFieldsVisibility() {
+        if (!dbTypeSelect) return;
         const val = dbTypeSelect.value;
         if (val === 'postgresql') {
             if (postgresGroup) postgresGroup.style.display = 'block';
@@ -85,7 +139,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (sqliteGroup) sqliteGroup.style.display = 'block';
         }
     }
-    dbTypeSelect.addEventListener('change', updateDbFieldsVisibility);
+    if (dbTypeSelect) {
+        dbTypeSelect.addEventListener('change', updateDbFieldsVisibility);
+    }
 
     // Load Configuration from API
     async function loadConfig() {
@@ -134,191 +190,224 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Save Configuration to API
-    configForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const autoStartCheck = document.getElementById('AUTO_START_ON_STARTUP');
-        const autoStartModeSelect = document.getElementById('AUTO_START_MODE');
-        const payload = {
-            startup: {
-                auto_start_on_startup: autoStartCheck ? autoStartCheck.checked : true,
-                auto_start_mode: autoStartModeSelect ? autoStartModeSelect.value : 'mockup'
-            },
-            AUTO_START_ON_STARTUP: autoStartCheck ? autoStartCheck.checked : true,
-            AUTO_START_MODE: autoStartModeSelect ? autoStartModeSelect.value : 'mockup',
-            serial: {
-                port: serialPortInput.value.trim(),
-                baudrate: parseInt(serialBaudrate.value, 10),
-                timeout: parseFloat(serialTimeout.value),
-                channel: parseInt(serialChannel.value, 10)
-            },
-            database: {
-                db_type: dbTypeSelect.value,
-                db_name: dbNameInput ? dbNameInput.value.trim() : 'mddp_lab',
-                table_name: dbTableInput ? dbTableInput.value.trim() : 'musashi_telemetry',
-                host: dbHostInput ? dbHostInput.value.trim() : 'localhost',
-                port: dbPortInput ? parseInt(dbPortInput.value, 10) : 5432,
-                user: dbUserInput ? dbUserInput.value.trim() : 'admin',
-                password: dbPasswordInput ? dbPasswordInput.value.trim() : 'admin',
-                influx_url: influxUrlInput ? influxUrlInput.value.trim() : 'http://localhost:8086',
-                influx_org: influxOrgInput ? influxOrgInput.value.trim() : 'mddp',
-                influx_bucket: influxBucketInput ? influxBucketInput.value.trim() : 'musashi_telemetry',
-                influx_measurement: influxMeasurementInput ? influxMeasurementInput.value.trim() : 'musashi_telemetry',
-                influx_token: influxTokenInput ? influxTokenInput.value.trim() : '',
-                sqlite_path: sqlitePathInput ? sqlitePathInput.value.trim() : 'musashi_data.db',
-                description: "Database storage for MUSASHI Super ΣCMII Dispenser telemetry data"
-            },
-            acquisition: {
-                interval_time: parseFloat(acqInterval.value),
-                max_retries: 3
-            }
-        };
+    if (configForm) {
+        configForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const autoStartCheck = document.getElementById('AUTO_START_ON_STARTUP');
+            const autoStartModeSelect = document.getElementById('AUTO_START_MODE');
+            const payload = {
+                startup: {
+                    auto_start_on_startup: autoStartCheck ? autoStartCheck.checked : true,
+                    auto_start_mode: autoStartModeSelect ? autoStartModeSelect.value : 'mockup'
+                },
+                AUTO_START_ON_STARTUP: autoStartCheck ? autoStartCheck.checked : true,
+                AUTO_START_MODE: autoStartModeSelect ? autoStartModeSelect.value : 'mockup',
+                serial: {
+                    port: serialPortInput ? serialPortInput.value.trim() : '',
+                    baudrate: serialBaudrate ? parseInt(serialBaudrate.value, 10) : 9600,
+                    timeout: serialTimeout ? parseFloat(serialTimeout.value) : 2.0,
+                    channel: serialChannel ? parseInt(serialChannel.value, 10) : 1
+                },
+                database: {
+                    db_type: dbTypeSelect ? dbTypeSelect.value : 'postgresql',
+                    db_name: dbNameInput ? dbNameInput.value.trim() : 'mddp_lab',
+                    table_name: dbTableInput ? dbTableInput.value.trim() : 'musashi_telemetry',
+                    host: dbHostInput ? dbHostInput.value.trim() : 'localhost',
+                    port: dbPortInput ? parseInt(dbPortInput.value, 10) : 5432,
+                    user: dbUserInput ? dbUserInput.value.trim() : 'admin',
+                    password: dbPasswordInput ? dbPasswordInput.value.trim() : 'admin',
+                    influx_url: influxUrlInput ? influxUrlInput.value.trim() : 'http://localhost:8086',
+                    influx_org: influxOrgInput ? influxOrgInput.value.trim() : 'mddp',
+                    influx_bucket: influxBucketInput ? influxBucketInput.value.trim() : 'musashi_telemetry',
+                    influx_measurement: influxMeasurementInput ? influxMeasurementInput.value.trim() : 'musashi_telemetry',
+                    influx_token: influxTokenInput ? influxTokenInput.value.trim() : '',
+                    sqlite_path: sqlitePathInput ? sqlitePathInput.value.trim() : 'musashi_data.db',
+                    description: "Database storage for MUSASHI Super ΣCMII Dispenser telemetry data"
+                },
+                acquisition: {
+                    interval_time: acqInterval ? parseFloat(acqInterval.value) : 1.0,
+                    max_retries: 3
+                }
+            };
 
-        try {
-            const res = await fetch('/api/config', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-            const data = await res.json();
-            if (data.status === 'success') {
-                appendLog('[SYSTEM] Configuration saved successfully to config.json.');
-                alert('Configuration saved successfully!');
-            } else {
-                alert(`Error saving config: ${data.message}`);
+            try {
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    appendLog('[SYSTEM] Configuration saved successfully to config.json.');
+                    alert('Configuration saved successfully!');
+                } else {
+                    alert(`Error saving config: ${data.message}`);
+                }
+            } catch (err) {
+                appendLog(`[ERROR] Failed to save configuration: ${err.message}`, 'err');
             }
-        } catch (err) {
-            appendLog(`[ERROR] Failed to save configuration: ${err.message}`, 'err');
-        }
-    });
+        });
+    }
 
     // Scan Serial Ports
-    btnScanSerial.addEventListener('click', async () => {
-        try {
-            scannedPortsMenu.innerHTML = '<div class="device-item"><span class="dev-name">Scanning hardware ports...</span></div>';
-            scannedPortsMenu.classList.remove('hidden');
+    if (btnScanSerial) {
+        btnScanSerial.addEventListener('click', async () => {
+            try {
+                if (scannedPortsMenu) {
+                    scannedPortsMenu.innerHTML = '<div class="device-item"><span class="dev-name">Scanning hardware ports...</span></div>';
+                    scannedPortsMenu.classList.remove('hidden');
+                }
 
-            const res = await fetch('/api/scan_serial');
-            const data = await res.json();
+                const res = await fetch('/api/scan_serial');
+                const data = await res.json();
 
-            if (data.status === 'success' && data.devices.length > 0) {
-                scannedPortsMenu.innerHTML = '';
-                data.devices.forEach(dev => {
-                    const div = document.createElement('div');
-                    div.className = 'device-item';
-                    div.innerHTML = `
-                        <span class="dev-name">${dev.name}</span>
-                        <span class="dev-meta">${dev.type} ${dev.vendor ? '• ' + dev.vendor : ''}</span>
-                    `;
-                    div.addEventListener('click', () => {
-                        serialPortInput.value = dev.port || dev.id;
-                        scannedPortsMenu.classList.add('hidden');
-                        appendLog(`[SYSTEM] Selected serial port: ${serialPortInput.value}`);
-                    });
-                    scannedPortsMenu.appendChild(div);
-                });
-            } else {
-                scannedPortsMenu.innerHTML = '<div class="device-item"><span class="dev-name">No active ports found</span></div>';
+                if (scannedPortsMenu) {
+                    if (data.status === 'success' && data.devices && data.devices.length > 0) {
+                        scannedPortsMenu.innerHTML = '';
+                        data.devices.forEach(dev => {
+                            const div = document.createElement('div');
+                            div.className = 'device-item';
+                            div.innerHTML = `
+                                <span class="dev-name">${dev.name}</span>
+                                <span class="dev-meta">${dev.type} ${dev.vendor ? '• ' + dev.vendor : ''}</span>
+                            `;
+                            div.addEventListener('click', () => {
+                                if (serialPortInput) serialPortInput.value = dev.port || dev.id;
+                                scannedPortsMenu.classList.add('hidden');
+                                appendLog(`[SYSTEM] Selected serial port: ${dev.port || dev.id}`);
+                            });
+                            scannedPortsMenu.appendChild(div);
+                        });
+                    } else {
+                        scannedPortsMenu.innerHTML = '<div class="device-item"><span class="dev-name">No active ports found</span></div>';
+                    }
+                }
+            } catch (err) {
+                appendLog(`[ERROR] Port scan failed: ${err.message}`, 'err');
+                if (scannedPortsMenu) scannedPortsMenu.classList.add('hidden');
             }
-        } catch (err) {
-            appendLog(`[ERROR] Port scan failed: ${err.message}`, 'err');
-            scannedPortsMenu.classList.add('hidden');
-        }
-    });
+        });
+    }
 
     // Hide scan menu when clicking outside
     document.addEventListener('click', (e) => {
-        if (!btnScanSerial.contains(e.target) && !scannedPortsMenu.contains(e.target)) {
+        if (btnScanSerial && scannedPortsMenu && !btnScanSerial.contains(e.target) && !scannedPortsMenu.contains(e.target)) {
             scannedPortsMenu.classList.add('hidden');
         }
     });
 
     // Test Serial Connection
-    btnTestSerial.addEventListener('click', async () => {
-        const payload = {
-            serial: {
-                port: serialPortInput.value.trim(),
-                baudrate: parseInt(serialBaudrate.value, 10)
+    if (btnTestSerial) {
+        btnTestSerial.addEventListener('click', async () => {
+            const payload = {
+                serial: {
+                    port: serialPortInput ? serialPortInput.value.trim() : 'MOCK',
+                    baudrate: serialBaudrate ? parseInt(serialBaudrate.value, 10) : 9600
+                }
+            };
+            try {
+                appendLog(`[SYSTEM] Testing connection on ${payload.serial.port}...`);
+                const res = await fetch('/api/test_serial', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (data.success) {
+                    appendLog(`[SUCCESS] ${data.message}`, 'stats');
+                    alert(data.message);
+                } else {
+                    appendLog(`[ERROR] ${data.message}`, 'err');
+                    alert(data.message);
+                }
+            } catch (err) {
+                appendLog(`[ERROR] Serial test request failed: ${err.message}`, 'err');
             }
-        };
-        try {
-            appendLog(`[SYSTEM] Testing connection on ${payload.serial.port}...`);
-            const res = await fetch('/api/test_serial', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-            const data = await res.json();
-            if (data.success) {
-                appendLog(`[SUCCESS] ${data.message}`, 'stats');
-                alert(data.message);
-            } else {
-                appendLog(`[ERROR] ${data.message}`, 'err');
-                alert(data.message);
-            }
-        } catch (err) {
-            appendLog(`[ERROR] Serial test request failed: ${err.message}`, 'err');
-        }
-    });
+        });
+    }
 
     // Test Database Connection
-    btnTestDb.addEventListener('click', async () => {
-        const payload = {
-            database: {
-                db_type: dbTypeSelect.value,
-                db_name: dbNameInput ? dbNameInput.value.trim() : 'mddp_lab',
-                host: dbHostInput ? dbHostInput.value.trim() : 'localhost',
-                port: dbPortInput ? parseInt(dbPortInput.value, 10) : 5432,
-                user: dbUserInput ? dbUserInput.value.trim() : 'admin',
-                password: dbPasswordInput ? dbPasswordInput.value.trim() : 'admin',
-                influx_url: influxUrlInput ? influxUrlInput.value.trim() : 'http://localhost:8086',
-                influx_org: influxOrgInput ? influxOrgInput.value.trim() : 'mddp',
-                influx_bucket: influxBucketInput ? influxBucketInput.value.trim() : 'musashi_telemetry',
-                influx_token: influxTokenInput ? influxTokenInput.value.trim() : '',
-                sqlite_path: sqlitePathInput ? sqlitePathInput.value.trim() : 'musashi_data.db'
+    if (btnTestDb) {
+        btnTestDb.addEventListener('click', async () => {
+            const payload = {
+                database: {
+                    db_type: dbTypeSelect ? dbTypeSelect.value : 'postgresql',
+                    db_name: dbNameInput ? dbNameInput.value.trim() : 'mddp_lab',
+                    host: dbHostInput ? dbHostInput.value.trim() : 'localhost',
+                    port: dbPortInput ? parseInt(dbPortInput.value, 10) : 5432,
+                    user: dbUserInput ? dbUserInput.value.trim() : 'admin',
+                    password: dbPasswordInput ? dbPasswordInput.value.trim() : 'admin',
+                    influx_url: influxUrlInput ? influxUrlInput.value.trim() : 'http://localhost:8086',
+                    influx_org: influxOrgInput ? influxOrgInput.value.trim() : 'mddp',
+                    influx_bucket: influxBucketInput ? influxBucketInput.value.trim() : 'musashi_telemetry',
+                    influx_token: influxTokenInput ? influxTokenInput.value.trim() : '',
+                    sqlite_path: sqlitePathInput ? sqlitePathInput.value.trim() : 'musashi_data.db'
+                }
+            };
+            try {
+                appendLog('[SYSTEM] Testing database connectivity...');
+                const res = await fetch('/api/test_db', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (data.success) {
+                    appendLog(`[SUCCESS] ${data.message}`, 'stats');
+                    alert(data.message);
+                } else {
+                    appendLog(`[ERROR] ${data.message}`, 'err');
+                    alert(data.message);
+                }
+            } catch (err) {
+                appendLog(`[ERROR] Database test failed: ${err.message}`, 'err');
             }
-        };
-        try {
-            appendLog('[SYSTEM] Testing database connectivity...');
-            const res = await fetch('/api/test_db', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-            const data = await res.json();
-            if (data.success) {
-                appendLog(`[SUCCESS] ${data.message}`, 'stats');
-                alert(data.message);
-            } else {
-                appendLog(`[ERROR] ${data.message}`, 'err');
-                alert(data.message);
-            }
-        } catch (err) {
-            appendLog(`[ERROR] Database test failed: ${err.message}`, 'err');
-        }
-    });
+        });
+    }
 
     // Start Ingestion Actions
-    btnStartReal.addEventListener('click', () => {
-        appendLog('[SYSTEM] Requesting start REAL Musashi II hardware ingestion stream...');
-        socket.emit('start_musashi', { mode: 'real' });
-    });
+    if (btnStartReal) {
+        btnStartReal.addEventListener('click', () => {
+            appendLog('[SYSTEM] Requesting start REAL Musashi II hardware ingestion stream...');
+            if (socket) {
+                socket.emit('start_musashi', { mode: 'real' });
+            } else {
+                appendLog('[ERROR] Socket.IO bridge unavailable. Cannot start ingestion.', 'err');
+            }
+        });
+    }
 
-    btnStartMock.addEventListener('click', () => {
-        appendLog('[SYSTEM] Requesting start MOCK Musashi II synthetic simulation...');
-        socket.emit('start_musashi', { mode: 'mockup' });
-    });
+    if (btnStartMock) {
+        btnStartMock.addEventListener('click', () => {
+            appendLog('[SYSTEM] Requesting start MOCK Musashi II synthetic simulation...');
+            if (socket) {
+                socket.emit('start_musashi', { mode: 'mockup' });
+            } else {
+                appendLog('[ERROR] Socket.IO bridge unavailable. Cannot start simulation.', 'err');
+            }
+        });
+    }
 
-    btnStop.addEventListener('click', () => {
-        appendLog('[SYSTEM] Requesting stop Musashi II ingestion process...');
-        socket.emit('stop_musashi');
-    });
+    if (btnStop) {
+        btnStop.addEventListener('click', () => {
+            appendLog('[SYSTEM] Requesting stop Musashi II ingestion process...');
+            if (socket) {
+                socket.emit('stop_musashi');
+            } else {
+                appendLog('[ERROR] Socket.IO bridge unavailable. Cannot stop process.', 'err');
+            }
+        });
+    }
 
-    btnClearLog.addEventListener('click', () => {
-        terminalBody.innerHTML = '';
-    });
+    if (btnClearLog) {
+        btnClearLog.addEventListener('click', () => {
+            if (terminalBody) terminalBody.innerHTML = '';
+        });
+    }
 
-    // Log Console Helper
+    // Log Console Helper with DOM node capping (MAX_LOG_LINES = 500)
     function appendLog(lineText, type = 'sys') {
+        if (!terminalBody) return;
         const div = document.createElement('div');
         div.className = 'log-line';
         if (type === 'err' || lineText.includes('ERROR') || lineText.includes('failed')) {
@@ -330,53 +419,90 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         div.textContent = lineText;
         terminalBody.appendChild(div);
+
+        // Cap to MAX_LOG_LINES to prevent memory leak on 24/7 displays
+        while (terminalBody.childElementCount > MAX_LOG_LINES) {
+            if (terminalBody.firstElementChild) {
+                terminalBody.removeChild(terminalBody.firstElementChild);
+            }
+        }
+
         terminalBody.scrollTop = terminalBody.scrollHeight;
     }
 
     // Socket.IO Handlers
-    socket.on('connect', () => {
-        appendLog('[SYSTEM] Connected to Musashi II Socket.IO server on Port 8082.');
-    });
-
-    socket.on('status_change', (data) => {
-        const isRunning = data.is_running;
-        const mode = data.mode || 'mockup';
-
-        if (isRunning) {
-            if (mode === 'real') {
-                statusDot.className = 'pulse-dot online';
-                statusText.textContent = 'HARDWARE ACTIVE';
-            } else {
-                statusDot.className = 'pulse-dot mock';
-                statusText.textContent = 'MOCK SIMULATION';
+    if (socket) {
+        socket.on('connect', () => {
+            appendLog('[SYSTEM] Connected to Musashi II Socket.IO server on Port 8082.');
+            if (logIndicator) {
+                logIndicator.textContent = 'CONNECTED';
+                logIndicator.classList.remove('text-error');
             }
-            btnStartReal.disabled = true;
-            btnStartMock.disabled = true;
-            btnStop.disabled = false;
-        } else {
-            statusDot.className = 'pulse-dot offline';
-            statusText.textContent = 'OFFLINE';
-            btnStartReal.disabled = false;
-            btnStartMock.disabled = false;
-            btnStop.disabled = true;
-        }
-    });
+        });
 
-    socket.on('stats_update', (stats) => {
-        if (!stats) return;
-        if (stats.polled) elPolled.textContent = stats.polled;
-        if (stats.pressure_kpa) elPressure.textContent = stats.pressure_kpa;
-        if (stats.time_ms) elTime.textContent = stats.time_ms;
-        if (stats.vacuum_kpa) elVacuum.textContent = stats.vacuum_kpa;
-        if (stats.mode_name) elMode.textContent = stats.mode_name;
-        if (stats.product_name) elProduct.textContent = stats.product_name;
-    });
+        socket.on('disconnect', (reason) => {
+            appendLog(`[SYSTEM] Disconnected from server (${reason || 'transport close'}).`, 'err');
+            setDisconnectedState();
+        });
 
-    socket.on('log_update', (data) => {
-        if (data && data.log) {
-            appendLog(data.log);
-        }
-    });
+        socket.on('connect_error', (err) => {
+            setDisconnectedState();
+        });
+
+        socket.on('status_change', (data) => {
+            const isRunning = data.is_running;
+            const mode = data.mode || 'mockup';
+
+            if (isRunning) {
+                if (statusDot) {
+                    if (mode === 'real') {
+                        statusDot.className = 'pulse-dot online';
+                    } else {
+                        statusDot.className = 'pulse-dot mock';
+                    }
+                }
+                if (statusText) {
+                    if (mode === 'real') {
+                        statusText.textContent = 'HARDWARE ACTIVE';
+                    } else {
+                        statusText.textContent = 'MOCK SIMULATION';
+                    }
+                }
+                if (btnStartReal) btnStartReal.disabled = true;
+                if (btnStartMock) btnStartMock.disabled = true;
+                if (btnStop) btnStop.disabled = false;
+            } else {
+                if (statusDot) {
+                    statusDot.className = 'pulse-dot offline';
+                }
+                if (statusText) {
+                    statusText.textContent = 'OFFLINE';
+                }
+                if (btnStartReal) btnStartReal.disabled = false;
+                if (btnStartMock) btnStartMock.disabled = false;
+                if (btnStop) btnStop.disabled = true;
+
+                // Reset telemetry when worker process is offline
+                resetTelemetry();
+            }
+        });
+
+        socket.on('stats_update', (stats) => {
+            if (!stats) return;
+            if (stats.polled && elPolled) elPolled.textContent = stats.polled;
+            if (stats.pressure_kpa && elPressure) elPressure.textContent = stats.pressure_kpa;
+            if (stats.time_ms && elTime) elTime.textContent = stats.time_ms;
+            if (stats.vacuum_kpa && elVacuum) elVacuum.textContent = stats.vacuum_kpa;
+            if (stats.mode_name && elMode) elMode.textContent = stats.mode_name;
+            if (stats.product_name && elProduct) elProduct.textContent = stats.product_name;
+        });
+
+        socket.on('log_update', (data) => {
+            if (data && data.log) {
+                appendLog(data.log);
+            }
+        });
+    }
 
     // Initial config load
     loadConfig();

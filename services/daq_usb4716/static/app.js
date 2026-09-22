@@ -2,7 +2,12 @@
 // See: docs/architecture/context.md
 // English comments only
 
-const socket = io();
+let socket = null;
+if (typeof io !== 'undefined') {
+    socket = io();
+} else {
+    console.warn('Socket.IO library not loaded; realtime updates disabled.');
+}
 let isSystemRunning = false;
 let scaleConfigs = {};
 let currentScaleChannel = '0';
@@ -301,7 +306,11 @@ function updateUIState(running, mode = 'mockup', destination = 'database') {
         modeSelect.disabled = true;
         
         statusIndicator.classList.add('active');
-        statusDot.className = 'pulse-dot green';
+        if (mode === 'mockup' || mode === 'mock') {
+            statusDot.className = 'pulse-dot mock';
+        } else {
+            statusDot.className = 'pulse-dot online green';
+        }
         statusText.textContent = `RUNNING (${mode.toUpperCase()} - ${destLabel})`;
     } else {
         startBtn.disabled = false;
@@ -364,12 +373,20 @@ async function handleConfigSave(e) {
 // Handle Run command
 function handleStartProcess() {
     const mode = document.getElementById('mode-select').value;
-    socket.emit('start_daq', { mode: mode });
+    if (socket) {
+        socket.emit('start_daq', { mode: mode });
+    } else {
+        appendLog('ERROR', 'Socket.IO bridge unavailable. Cannot start process.');
+    }
 }
 
 // Handle Stop command
 function handleStopProcess() {
-    socket.emit('stop_daq');
+    if (socket) {
+        socket.emit('stop_daq');
+    } else {
+        appendLog('ERROR', 'Socket.IO bridge unavailable. Cannot stop process.');
+    }
 }
 
 // Clear terminal logs
@@ -422,6 +439,9 @@ function showToast(message, isError = false) {
 
 // Setup WebSocket triggers
 function bindSocketEvents() {
+    if (!socket) {
+        return;
+    }
     socket.on('connect', () => {
         appendLog('SUCCESS', 'WebSocket bridge connected.');
     });
@@ -515,12 +535,9 @@ function handleScaleChannelTargetChange(e) {
 function resolveBackLink() {
     const backLink = document.querySelector('.back-link');
     if (backLink) {
+        const protocol = window.location.protocol || 'http:';
         const hostname = window.location.hostname || 'localhost';
-        const targetUrl = `http://${hostname}:8080`;
+        const targetUrl = `${protocol}//${hostname}:8080`;
         backLink.setAttribute('href', targetUrl);
-        backLink.addEventListener('click', (e) => {
-            e.preventDefault();
-            window.location.href = targetUrl;
-        });
     }
 }

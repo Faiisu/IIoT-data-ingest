@@ -29,8 +29,24 @@ ENQ = b'\x05'
 ACK = b'\x06'
 CAN = b'\x18'
 
+# Maximum frame size allowed in read_frame to prevent unbounded memory growth
+MAX_FRAME_SIZE = 128
+
+# Precompiled regex for DA01 response payload
+# Format: P xxxx T xxxxx V xxxx M x N xxxxxxxxxx
+# Numeric fields allow space padding (digits or spaces)
+DA01_REGEX = re.compile(
+    r"^P(?P<pressure>[\d\s]{4})"
+    r"T(?P<time>[\d\s]{5})"
+    r"V(?P<vacuum>[\d\s]{4})"
+    r"M(?P<mode>[\d\s])"
+    r"N(?P<name>.{10})$",
+    re.DOTALL
+)
+
+
 class MusashiDispenser:
-    def __init__(self, port, baudrate=9600, timeout=2.0):
+    def __init__(self, port, baudrate=9600, timeout=2.0, init_delay=1.0):
         """
         Initializes serial connection to MUSASHI Super ΣCMII dispenser.
         Communication specifications based on Page 78:
@@ -44,33 +60,48 @@ class MusashiDispenser:
             stopbits=serial.STOPBITS_ONE,
             timeout=timeout
         )
-        time.sleep(1)  # Allow serial port to initialize
+        if init_delay > 0:
+            time.sleep(init_delay)  # Allow serial port to initialize
         logger.info(f"Connected to MUSASHI Dispenser on {port} at {baudrate} bps.")
 
     def close(self):
         """Closes the serial connection."""
-        if hasattr(self, 'ser') and self.ser and self.ser.is_open:
-            self.ser.close()
+        if hasattr(self, 'ser') and self.ser and getattr(self.ser, 'is_open', True):
+            try:
+                self.ser.close()
+            except Exception:
+                pass
             logger.info("Serial connection closed.")
 
-    def compute_checksum(self, payload_str):
+    def compute_checksum(self, payload):
         """
         Calculates the 2-character hex checksum as specified on Page 83:
         Subtracted from 0 in 8-bit unsigned modulo 256 for all ASCII characters
         in the character count, command, and data payload.
+        Accepts both str and bytes/bytearray without throwing TypeError.
         """
         csum = 0
-        for char in payload_str:
-            csum = (csum - ord(char)) & 0xFF
+        if isinstance(payload, (bytes, bytearray)):
+            for b in payload:
+                csum = (csum - b) & 0xFF
+        elif isinstance(payload, str):
+            for char in payload:
+                csum = (csum - ord(char)) & 0xFF
+        else:
+            raise TypeError(f"Expected str, bytes, or bytearray, got {type(payload).__name__}")
         return f"{csum:02X}"
 
     def verify_frame_checksum(self, frame_str):
         """
         Verifies the checksum of a frame string (excluding STX and ETX).
         Expected format: [Payload (N chars)][Checksum (2 hex chars)]
+        Frame must be at least 6 characters (length + cmd/data + checksum).
         """
-        if len(frame_str) < 4:
-            raise ValueError(f"Frame too short to contain checksum: '{frame_str}'")
+        if isinstance(frame_str, (bytes, bytearray)):
+            frame_str = frame_str.decode('ascii')
+
+        if len(frame_str) < 6:
+            raise ValueError(f"Frame too short to contain checksum: '{frame_str}' (minimum 6 characters required)")
         
         payload = frame_str[:-2]
         recv_checksum = frame_str[-2:].upper()
@@ -100,13 +131,24 @@ class MusashiDispenser:
         """
         Reads a full STX ... ETX frame from the serial buffer.
         Returns the decoded string inside STX and ETX.
+        Includes an STX hunting loop bounded by timeout, strict ASCII decoding,
+        and maximum frame size enforcement.
         """
         if not already_read_stx:
-            b = self.ser.read(1)
-            if not b:
+            stx_found = False
+            start_time = time.time()
+            timeout_val = getattr(self.ser, 'timeout', 2.0)
+            if timeout_val is None or timeout_val <= 0:
+                timeout_val = 2.0
+            while (time.time() - start_time) <= timeout_val:
+                b = self.ser.read(1)
+                if not b:
+                    break
+                if b == STX:
+                    stx_found = True
+                    break
+            if not stx_found:
                 raise Exception("Timeout waiting for response frame STX (0x02).")
-            if b != STX:
-                raise Exception(f"Protocol error: Expected STX (b'\\x02'), got {b!r}")
 
         frame_bytes = bytearray()
         while True:
@@ -116,14 +158,40 @@ class MusashiDispenser:
             if b == ETX:
                 break
             frame_bytes.extend(b)
+            if len(frame_bytes) > MAX_FRAME_SIZE:
+                raise ValueError(f"Frame exceeded maximum allowed size of {MAX_FRAME_SIZE} bytes.")
 
-        return frame_bytes.decode('ascii', errors='ignore')
+        try:
+            return frame_bytes.decode('ascii')
+        except UnicodeDecodeError as e:
+            raise ValueError(f"Frame contained non-ASCII bytes: {e}") from e
+
+    def _send_abort_sequence(self):
+        """Attempts to send CAN (0x18) + short sleep + EOT (0x04) and reset input buffer."""
+        try:
+            if hasattr(self, 'ser') and self.ser and getattr(self.ser, 'is_open', True):
+                self.ser.write(CAN)
+                time.sleep(0.05)
+                self.ser.write(EOT)
+                if hasattr(self.ser, 'reset_input_buffer'):
+                    self.ser.reset_input_buffer()
+        except Exception as e:
+            logger.debug(f"Failed to send abort sequence: {e}")
 
     def execute_upload_command(self, command="UL", data="001D01"):
         """
         Executes an Upload type command (UL) using the 10-step Handshake Procedure (Page 81).
+        On any exception or failure, attempts abort recovery (CAN + EOT + reset_input_buffer).
         """
-        self.ser.reset_input_buffer()
+        try:
+            return self._execute_upload_handshake(command, data)
+        except Exception:
+            self._send_abort_sequence()
+            raise
+
+    def _execute_upload_handshake(self, command="UL", data="001D01"):
+        if hasattr(self.ser, 'reset_input_buffer'):
+            self.ser.reset_input_buffer()
 
         # Step 1: PC sends ENQ
         self.ser.write(ENQ)
@@ -145,13 +213,18 @@ class MusashiDispenser:
         if resp == STX:
             # Dispenser returned a frame (A0 confirmation or A2 error)
             cmd_resp_str = self.read_frame(already_read_stx=True)
+            # Step 4 Error Frame Check: Check if response is A2 error frame BEFORE checksum verification
+            if len(cmd_resp_str) >= 4 and cmd_resp_str[2:4] == "A2":
+                self.ser.write(CAN)
+                time.sleep(0.05)
+                self.ser.write(EOT)
+                if hasattr(self.ser, 'reset_input_buffer'):
+                    self.ser.reset_input_buffer()
+                raise Exception(f"Command Error (A2) returned by Dispenser: {cmd_resp_str}")
+
             self.verify_frame_checksum(cmd_resp_str)
             
-            if "A2" in cmd_resp_str[:5]:
-                self.ser.write(CAN)
-                self.ser.write(EOT)
-                raise Exception(f"Command Error (A2) returned by Dispenser: {cmd_resp_str}")
-            elif "A0" in cmd_resp_str[:5]:
+            if len(cmd_resp_str) >= 4 and cmd_resp_str[2:4] == "A0":
                 # Command accepted with A0 frame! Acknowledge receipt of A0 frame
                 self.ser.write(ACK)
             else:
@@ -182,10 +255,13 @@ class MusashiDispenser:
         else:
             raise Exception(f"Handshake failed: Expected ENQ (0x05) or STX (0x02), got: {first_byte!r}")
 
-        # Check if returned payload indicates command error A2
-        if "A2" in data_frame_str[:5]:
+        # Check if returned payload indicates command error A2 before checksum
+        if len(data_frame_str) >= 4 and data_frame_str[2:4] == "A2":
             self.ser.write(CAN)
+            time.sleep(0.05)
             self.ser.write(EOT)
+            if hasattr(self.ser, 'reset_input_buffer'):
+                self.ser.reset_input_buffer()
             raise Exception(f"Command Error (A2) returned by Dispenser: {data_frame_str}")
 
         # Verify checksum of received data frame
@@ -194,46 +270,65 @@ class MusashiDispenser:
         # Step 9: PC replies ACK
         self.ser.write(ACK)
 
-        # Step 10: Dispenser sends EOT
-        resp_eot = self.ser.read(1)
-        if resp_eot and resp_eot != EOT:
-            logger.warning(f"Expected EOT (0x04) at Step 10, got: {resp_eot!r}")
+        # Step 10: Dispenser sends EOT without blocking 2s if omitted or timed out
+        orig_timeout = getattr(self.ser, 'timeout', 2.0)
+        try:
+            if hasattr(self.ser, 'timeout'):
+                self.ser.timeout = min(orig_timeout, 0.1) if orig_timeout is not None else 0.1
+            resp_eot = self.ser.read(1)
+            if resp_eot and resp_eot != EOT:
+                logger.warning(f"Expected EOT (0x04) at Step 10, got: {resp_eot!r}")
+        finally:
+            if hasattr(self.ser, 'timeout'):
+                self.ser.timeout = orig_timeout
 
         return data_frame_str
 
     def parse_da01_parameters(self, frame_str):
         """
         Parses DA01 response payload (Dispense parameters):
-        Format: 21 DA01 P xxxx T xxxxx V xxxx M x N xxxxxxxxxx CS
+        Format: [2-digit hex length] DA01 P xxxx T xxxxx V xxxx M x N xxxxxxxxxx CS
         """
-        payload = frame_str[:-2]  # strip 2-character checksum at the end
-        
-        # Remove length prefix (e.g. "21") if present
-        if payload.startswith("21"):
-            payload = payload[2:]
+        if len(frame_str) < 6:
+            raise ValueError(f"Invalid frame format: '{frame_str}'")
+
+        # Strip checksum (last 2 characters) if frame contains checksum
+        # Check if frame without last 2 chars matches DA01 or length-prefixed DA01
+        temp = frame_str[:-2]
+        if temp.startswith("DA01") or (len(temp) >= 6 and temp[2:].startswith("DA01")):
+            payload = temp
+        else:
+            payload = frame_str
+
+        # Dynamically strip 2-digit hex length prefix if present
+        if len(payload) >= 6 and payload[2:].startswith("DA01"):
+            try:
+                int(payload[:2], 16)
+                payload = payload[2:]
+            except ValueError:
+                pass
             
         if not payload.startswith("DA01"):
             raise ValueError(f"Invalid payload format for DA01: '{frame_str}'")
             
         content = payload[4:]  # strip DA01 command prefix
         
-        pattern = r"^P(?P<pressure>\d{4})T(?P<time>\d{5})V(?P<vacuum>\d{4})M(?P<mode>\d)N(?P<name>.{10})$"
-        match = re.match(pattern, content)
+        match = DA01_REGEX.match(content)
         if not match:
             raise ValueError(f"Failed to parse DA01 parameters pattern from: '{content}'")
 
         groups = match.groupdict()
         
-        p_raw = int(groups['pressure'])
+        p_raw = int(groups['pressure'].strip())
         pressure_kpa = round(p_raw * 0.1, 1)  # 0.1 kPa per unit
         
-        t_raw = int(groups['time'])
+        t_raw = int(groups['time'].strip())
         time_ms = t_raw  # 1 ms per unit
         
-        v_raw = int(groups['vacuum'])
+        v_raw = int(groups['vacuum'].strip())
         vacuum_kpa = round(v_raw * 0.01, 2)  # 0.01 kPa per unit
         
-        mode_code = int(groups['mode'])
+        mode_code = int(groups['mode'].strip())
         mode_names = {
             0: "Timed",
             1: "Manual",
@@ -242,7 +337,7 @@ class MusashiDispenser:
         }
         mode_name = mode_names.get(mode_code, f"Unknown ({mode_code})")
         
-        product_name = groups['name'].rstrip()
+        product_name = groups['name'].rstrip(' \t\r\n\x00')
 
         return {
             "pressure_kpa": pressure_kpa,
@@ -278,8 +373,10 @@ class MusashiDispenser:
 
 class MockMusashiDispenser:
     """Mock/Synthetic Musashi dispenser for driver-free & offline hardware testing."""
-    def __init__(self, port="MOCK", baudrate=9600, timeout=2.0):
+    def __init__(self, port="MOCK", baudrate=9600, timeout=2.0, init_delay=0.0):
         self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
         self.ser = None
         logger.info("Connected to MOCK MUSASHI Dispenser (Synthetic Simulation Mode).")
 
@@ -287,7 +384,67 @@ class MockMusashiDispenser:
         """Closes mock connection."""
         logger.info("Mock serial connection closed.")
 
+    def compute_checksum(self, payload):
+        """Calculates 2-character hex checksum matching real dispenser."""
+        csum = 0
+        if isinstance(payload, (bytes, bytearray)):
+            for b in payload:
+                csum = (csum - b) & 0xFF
+        elif isinstance(payload, str):
+            for char in payload:
+                csum = (csum - ord(char)) & 0xFF
+        else:
+            raise TypeError(f"Expected str, bytes, or bytearray, got {type(payload).__name__}")
+        return f"{csum:02X}"
+
+    def verify_frame_checksum(self, frame_str):
+        """Verifies frame checksum matching real dispenser."""
+        if isinstance(frame_str, (bytes, bytearray)):
+            frame_str = frame_str.decode('ascii')
+        if len(frame_str) < 6:
+            raise ValueError(f"Frame too short to contain checksum: '{frame_str}' (minimum 6 characters required)")
+        payload = frame_str[:-2]
+        recv_checksum = frame_str[-2:].upper()
+        calc_checksum = self.compute_checksum(payload)
+        if recv_checksum != calc_checksum:
+            raise ValueError(
+                f"Checksum verification failed! Received: '{recv_checksum}', Expected: '{calc_checksum}'"
+            )
+        return True
+
+    def build_frame(self, command, data=""):
+        """Builds command frame matching real dispenser."""
+        cmd_data = command + data
+        char_count = f"{len(cmd_data):02X}"
+        payload = char_count + cmd_data
+        checksum = self.compute_checksum(payload)
+        return STX + payload.encode('ascii') + checksum.encode('ascii') + ETX
+
+    def read_frame(self, already_read_stx=False):
+        """Stub method for read_frame."""
+        return "02A02D"
+
+    def execute_upload_command(self, command="UL", data="001D01"):
+        """Stub method for execute_upload_command returning a valid DA01 frame string."""
+        p_raw = 500
+        time_ms = 250
+        v_raw = 50
+        prod_name_10 = "PROD_MOCK "
+        cmd_data = f"DA01P{p_raw:04d}T{time_ms:05d}V{v_raw:04d}M2N{prod_name_10}"
+        length_prefix = f"{len(cmd_data):02X}"
+        payload = length_prefix + cmd_data
+        checksum = self.compute_checksum(payload)
+        return payload + checksum
+
+    def parse_da01_parameters(self, frame_str):
+        """Parses DA01 parameters matching real dispenser."""
+        return MusashiDispenser.parse_da01_parameters(self, frame_str)
+
     def read_pressure(self, channel=1):
+        """Reads and extracts pressure value for given channel (1 to 100)."""
+        if not (1 <= channel <= 100):
+            raise ValueError("Channel must be between 1 and 100.")
+
         import random
         p_raw = random.randint(480, 520)
         time_ms = random.randint(240, 260)
@@ -296,6 +453,13 @@ class MockMusashiDispenser:
         pressure_kpa = round(p_raw * 0.1, 1)
         vacuum_kpa = round(v_raw * 0.01, 2)
         
+        prod_name_10 = "PROD_MOCK "  # Exact 10 characters
+        cmd_data = f"DA01P{p_raw:04d}T{time_ms:05d}V{v_raw:04d}M2N{prod_name_10}"
+        length_prefix = f"{len(cmd_data):02X}"
+        payload = length_prefix + cmd_data
+        checksum = self.compute_checksum(payload)
+        raw_payload = payload + checksum
+
         return {
             "channel": channel,
             "pressure_kpa": pressure_kpa,
@@ -305,8 +469,8 @@ class MockMusashiDispenser:
             "vacuum_kpa": vacuum_kpa,
             "mode_code": 2,
             "mode_name": "Sigma Timed",
-            "product_name": "PROD_MOCK",
-            "raw_payload": f"21DA01P{p_raw:04d}T{time_ms:05d}V{v_raw:04d}M2NPROD_MOCK  00"
+            "product_name": prod_name_10.rstrip(' \t\r\n\x00'),
+            "raw_payload": raw_payload
         }
 
     def read_dispense_parameters(self, channel=1):
@@ -315,39 +479,76 @@ class MockMusashiDispenser:
 
 def resolve_serial_port(requested_port):
     """
-    Resolves serial port path for cross-platform compatibility (Windows vs macOS/Linux).
-    If running on Windows and the configured port is a POSIX path (/dev/...) or unavailable,
-    automatically detects active COM ports.
+    Resolves serial port path for cross-platform compatibility (Windows vs macOS vs Linux).
+    - On Windows: only auto-selects if requested_port is AUTO or a /dev/ path. Never hijacks
+      a requested COM port.
+    - On Linux: if requested port is a macOS /dev/cu.usbserial path or AUTO or COM port,
+      resolves to detected /dev/ttyUSB* or /dev/ttyACM* port.
     """
+    if not requested_port:
+        requested_port = "AUTO"
+
     try:
         available_ports = [p.device for p in serial.tools.list_ports.comports()]
     except Exception:
         available_ports = []
 
-    if sys.platform == "win32" or os.name == "nt":
-        if requested_port.startswith("/dev/") or (available_ports and requested_port not in available_ports):
+    is_windows = sys.platform == "win32" or os.name == "nt"
+    is_linux = sys.platform.startswith("linux")
+
+    if is_windows:
+        # On Windows: only auto-select port if requested_port is AUTO or /dev/ path.
+        # Do NOT hijack another COM port if a specific COM was requested.
+        if requested_port.upper() == "AUTO" or requested_port.startswith("/dev/"):
             if available_ports:
                 chosen = available_ports[0]
                 logger.warning(
-                    f"Configured port '{requested_port}' is invalid on Windows. "
+                    f"Configured port '{requested_port}' requires auto-detection on Windows. "
                     f"Auto-selected detected port '{chosen}' (Available: {available_ports})"
                 )
                 return chosen
             else:
                 logger.warning(
-                    f"Configured port '{requested_port}' is invalid on Windows and no COM ports detected. "
+                    f"Configured port '{requested_port}' requires auto-detection on Windows, but no COM ports detected. "
                     f"Defaulting to 'COM1'."
                 )
                 return "COM1"
-    else:
-        if requested_port.startswith("COM"):
-            if available_ports:
-                chosen = available_ports[0]
+        return requested_port
+
+    if is_linux:
+        # On Linux: if requested port is a macOS /dev/cu.usbserial path or AUTO or COM port,
+        # resolve to detected /dev/ttyUSB* or /dev/ttyACM* port.
+        if requested_port.startswith("/dev/cu.") or requested_port.upper() == "AUTO" or requested_port.startswith("COM"):
+            matching_ports = [p for p in available_ports if "/dev/ttyUSB" in p or "/dev/ttyACM" in p or "ttyUSB" in p or "ttyACM" in p]
+            if matching_ports:
+                chosen = matching_ports[0]
                 logger.warning(
-                    f"Configured Windows port '{requested_port}' is invalid on {sys.platform}. "
-                    f"Auto-selected detected port '{chosen}' (Available: {available_ports})"
+                    f"Port '{requested_port}' resolved on Linux to detected port '{chosen}'."
                 )
                 return chosen
+            elif available_ports:
+                chosen = available_ports[0]
+                logger.warning(
+                    f"Port '{requested_port}' resolved on Linux to detected port '{chosen}'."
+                )
+                return chosen
+            else:
+                default_linux = "/dev/ttyUSB0"
+                logger.warning(
+                    f"Port '{requested_port}' invalid on Linux and no ports detected. Defaulting to '{default_linux}'."
+                )
+                return default_linux
+        return requested_port
+
+    # macOS or other POSIX
+    if requested_port.startswith("COM") or requested_port.upper() == "AUTO":
+        if available_ports:
+            chosen = available_ports[0]
+            logger.warning(
+                f"Configured port '{requested_port}' invalid on {sys.platform}. "
+                f"Auto-selected detected port '{chosen}' (Available: {available_ports})"
+            )
+            return chosen
 
     return requested_port
 
@@ -355,6 +556,11 @@ def resolve_serial_port(requested_port):
 def load_config(config_path="config.json"):
     """Loads configuration from JSON file or returns default parameters."""
     default_port = "COM1" if sys.platform == "win32" else "/dev/cu.usbserial-A600bsZD"
+    if not os.path.isabs(config_path):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        candidate = os.path.join(base_dir, config_path)
+        if os.path.exists(candidate):
+            config_path = candidate
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -383,6 +589,7 @@ def run_ingestion_loop(config_path="config.json", max_iterations=None, override_
     """
     Main loop that continuously reads telemetry data from MUSASHI dispenser
     and saves it to the database at a configured interval_time.
+    Supports automatic reconnection with exponential backoff if serial connection is lost.
     """
     config = load_config(config_path)
     
@@ -413,19 +620,46 @@ def run_ingestion_loop(config_path="config.json", max_iterations=None, override_
 
     dispenser = None
     db_handler = None
+    reconnect_delay = 1.0
+    max_reconnect_delay = 30.0
+
+    def init_dispenser():
+        if mock_mode:
+            return MockMusashiDispenser(port="MOCK", baudrate=baudrate, timeout=timeout)
+        else:
+            resolved = resolve_serial_port(raw_port)
+            return MusashiDispenser(port=resolved, baudrate=baudrate, timeout=timeout)
 
     try:
-        if mock_mode:
-            dispenser = MockMusashiDispenser(port="MOCK", baudrate=baudrate, timeout=timeout)
-        else:
-            dispenser = MusashiDispenser(port=port, baudrate=baudrate, timeout=timeout)
-            
+        try:
+            dispenser = init_dispenser()
+        except (serial.SerialException, OSError) as err:
+            logger.error(f"Initial connection to dispenser failed: {err}. Will retry in ingestion loop.")
+            dispenser = None
+
         db_handler = DatabaseHandler(db_cfg)
         
         iteration = 0
         print(f"\nStarting data collection loop (interval: {interval_time}s). Press Ctrl+C to stop.\n")
 
         while True:
+            if max_iterations is not None and iteration >= max_iterations:
+                print(f"\nReached target iterations limit ({max_iterations}). Exiting loop.")
+                break
+
+            # Handle reconnection if dispenser is not connected
+            if dispenser is None:
+                logger.info(f"Attempting to reconnect to dispenser (retry backoff: {reconnect_delay:.1f}s)...")
+                try:
+                    dispenser = init_dispenser()
+                    logger.info("Dispenser connection established.")
+                    reconnect_delay = 1.0  # Reset backoff on success
+                except (serial.SerialException, OSError) as conn_err:
+                    logger.error(f"Reconnection failed: {conn_err}. Retrying in {reconnect_delay:.1f}s...")
+                    time.sleep(reconnect_delay)
+                    reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+                    continue
+
             iteration += 1
             timestamp_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z")
             print(f"[{timestamp_str}] [Loop #{iteration}] Reading Channel {channel}...")
@@ -438,6 +672,17 @@ def run_ingestion_loop(config_path="config.json", max_iterations=None, override_
                 print(f"     Pressure: {data['pressure_kpa']} kPa | Time: {data['time_ms']} ms | Vacuum: {data['vacuum_kpa']} kPa | Mode: {data['mode_name']} | Product: '{data['product_name']}'")
                 print(f"[STATS] polled={iteration} | written={iteration} | db_errors=0 | pressure_kpa={data['pressure_kpa']} | time_ms={data['time_ms']} | vacuum_kpa={data['vacuum_kpa']} | mode={data['mode_name']} | product={data['product_name']}")
                 sys.stdout.flush()
+            except (serial.SerialException, OSError) as ser_err:
+                logger.error(f"Serial connection lost or I/O error: {ser_err}. Closing dispenser and scheduling reconnect...")
+                if dispenser:
+                    try:
+                        dispenser.close()
+                    except Exception:
+                        pass
+                dispenser = None
+                time.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+                continue
             except Exception as err:
                 logger.error(f"Error acquiring or saving data: {err}")
                 sys.stdout.flush()
@@ -462,9 +707,15 @@ def run_ingestion_loop(config_path="config.json", max_iterations=None, override_
         logger.error(f"Service encountered an error: {err}")
     finally:
         if dispenser:
-            dispenser.close()
+            try:
+                dispenser.close()
+            except Exception:
+                pass
         if db_handler:
-            db_handler.close()
+            try:
+                db_handler.close()
+            except Exception:
+                pass
         print("Service shutdown complete.")
 
 

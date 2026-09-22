@@ -26,6 +26,23 @@ if PROJECT_ROOT not in sys.path:
 app = Flask(__name__, template_folder='templates', static_folder='static')
 socketio = SocketIO(app, cors_allowed_origins="*")
 
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        return ('', 204)
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    return response
+
+@app.route('/', defaults={'path': ''}, methods=['OPTIONS'])
+@app.route('/<path:path>', methods=['OPTIONS'])
+def options_preflight(path=''):
+    return ('', 204)
+
 # State files to persist process metadata across restarts
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config.json')
 PID_PATH = os.path.join(os.path.dirname(__file__), '.daq_process.pid')
@@ -347,10 +364,17 @@ def test_db():
 @app.route('/api/status', methods=['GET'])
 def get_status():
     pid, mode = get_running_process()
+    is_running = pid is not None
+    mode_val = mode or 'mockup'
     dest = read_config().get('DESTINATION', 'database')
     return jsonify({
-        'is_running': pid is not None,
-        'run_mode': mode or 'mockup',
+        'service_name': 'DAQ USB-4716',
+        'port': 8081,
+        'is_running': is_running,
+        'status': 'running' if is_running else 'stopped',
+        'mode': mode_val,
+        'run_mode': mode_val,
+        'pid': pid,
         'destination': dest
     })
 
@@ -487,24 +511,26 @@ def handle_stop():
     socketio.emit('status_change', {'is_running': False})
     socketio.emit('log_update', {'log': '[SYSTEM] Ingestion process terminated.'})
 
-# Initial recovery check on Web GUI startup
-pid, mode = get_running_process()
-if pid is not None:
-    print(f"[SYSTEM] Detected active background process running (PID: {pid}). Re-attaching...")
-    start_tailing()
-else:
-    cfg = read_config()
-    desired_state = read_desired_state()
-    auto_start_enabled = cfg.get('AUTO_START_ON_STARTUP', True)
-    is_desired_running = desired_state.get('is_running', False)
-    
-    if auto_start_enabled or is_desired_running:
-        target_mode = cfg.get('AUTO_START_MODE') or desired_state.get('mode', 'mockup')
-        print(f"[SYSTEM] Startup config AUTO_START_ON_STARTUP is enabled. Auto-starting DAQ ingestion in MODE={target_mode.upper()}...")
-        handle_start({'mode': target_mode})
+def init_application():
+    """Initial recovery check on Web GUI startup."""
+    pid, mode = get_running_process()
+    if pid is not None:
+        print(f"[SYSTEM] Detected active background process running (PID: {pid}). Re-attaching...")
+        start_tailing()
     else:
-        print("[SYSTEM] Startup config AUTO_START_ON_STARTUP is disabled. Awaiting manual start trigger.")
+        cfg = read_config()
+        desired_state = read_desired_state()
+        auto_start_enabled = cfg.get('AUTO_START_ON_STARTUP', True)
+        is_desired_running = desired_state.get('is_running', False)
+        
+        if auto_start_enabled or is_desired_running:
+            target_mode = cfg.get('AUTO_START_MODE') or desired_state.get('mode', 'mockup')
+            print(f"[SYSTEM] Startup config AUTO_START_ON_STARTUP is enabled. Auto-starting DAQ ingestion in MODE={target_mode.upper()}...")
+            handle_start({'mode': target_mode})
+        else:
+            print("[SYSTEM] Startup config AUTO_START_ON_STARTUP is disabled. Awaiting manual start trigger.")
 
 if __name__ == '__main__':
+    init_application()
     # Served on Port 8081
     socketio.run(app, host='0.0.0.0', port=8081, debug=False)

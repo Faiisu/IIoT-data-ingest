@@ -30,6 +30,23 @@ if PROJECT_ROOT not in sys.path:
 app = Flask(__name__, template_folder='templates', static_folder='static')
 socketio = SocketIO(app, cors_allowed_origins="*")
 
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        return ('', 204)
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    return response
+
+@app.route('/', defaults={'path': ''}, methods=['OPTIONS'])
+@app.route('/<path:path>', methods=['OPTIONS'])
+def options_preflight(path=''):
+    return ('', 204)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
 PID_PATH = os.path.join(BASE_DIR, '.musashi_process.pid')
@@ -244,10 +261,15 @@ def update_config():
 def get_status():
     pid, mode = get_running_process()
     is_running = pid is not None
+    mode_val = mode or ('mockup' if read_config().get('MOCKUP_MODE', True) else 'real')
     return jsonify({
+        'service_name': 'MUSASHI IV',
+        'port': 8083,
         'is_running': is_running,
+        'status': 'running' if is_running else 'stopped',
+        'mode': mode_val,
+        'run_mode': mode_val,
         'pid': pid,
-        'run_mode': mode or ('mockup' if read_config().get('MOCKUP_MODE', True) else 'real'),
         'config': read_config(),
         'last_stats': last_stats
     })

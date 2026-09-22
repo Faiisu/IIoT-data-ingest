@@ -10,19 +10,30 @@
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
     <!-- Socket.IO Client Library -->
-    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="/static/vendor/socket.io.min.js"></script>
+    <script>
+        if (typeof io === 'undefined') {
+            document.write('<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"><\/script>');
+        }
+    </script>
 </head>
 <body>
     <div class="dashboard-container">
         <!-- Header -->
         <header class="main-header">
             <div class="brand">
-                <a href="http://localhost:8080" class="back-link" title="Return to Ingestion Portal Gateway">
+                <a href="javascript:location.href=window.location.protocol+'//'+window.location.hostname+':8080'" class="back-link" title="Return to Ingestion Portal Gateway">
                     <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
                         <line x1="19" y1="12" x2="5" y2="12"></line>
                         <polyline points="12 19 5 12 12 5"></polyline>
                     </svg>
                 </a>
+                <script>
+                    (function() {
+                        var el = document.currentScript ? document.currentScript.previousElementSibling : document.querySelector('.back-link');
+                        if (el) el.href = (window.location.protocol || 'http:') + '//' + (window.location.hostname || 'localhost') + ':8080';
+                    })();
+                </script>
                 <div class="brand-text">
                     <h1>MUSASHI II CONTROL PANEL</h1>
                     <span class="sub-text">SUPER ΣCMII FLUID DISPENSER INGESTION SUITE</span>
@@ -320,7 +331,7 @@
                             <span>REALTIME PIPELINE LOG CONSOLE</span>
                         </div>
                         <div class="terminal-actions">
-                            <span class="log-indicator monospace" id="log-indicator">CONNECTED</span>
+                            <span class="log-indicator monospace" id="log-indicator">CONNECTING...</span>
                             <button type="button" id="btn-clear-log" class="btn-clear" title="Clear Console View">CLEAR</button>
                         </div>
                     </div>
