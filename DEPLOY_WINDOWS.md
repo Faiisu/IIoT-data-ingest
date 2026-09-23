@@ -51,7 +51,7 @@ pip --version
 
 1. Download and install the **DAQNavi SDK** from the Advantech Support website.
 2. After installation, verify the USB-4716 device appears in **Advantech Navigator** (installed with the SDK).
-3. Note the device description string (default: `USB-4716,BID#0`) — this must match `DEVICE_DESCRIPTION` in `services\daq_usb4716\config.json`.
+3. Note the device description string (default: `USB-4716,BID#0`) — this must match `DEVICE_DESCRIPTION` in `services\daq_navi\config.json`.
 
 ---
 
@@ -176,7 +176,7 @@ This will:
 
 ### Update Configuration
 
-Edit `services\daq_usb4716\config.json` to match your environment:
+Edit `services\daq_navi\config.json` to match your environment:
 
 ```json
 {
@@ -374,7 +374,7 @@ New-NetFirewallRule -DisplayName "MDDP Plotter (8084)" -Direction Inbound -Proto
 
 ## 8. Configuration Reference
 
-### services\daq_usb4716\config.json — Key Parameters
+### services\daq_navi\config.json — Key Parameters
 
 | Parameter | Default | Description |
 |:---|:---|:---|
@@ -391,7 +391,7 @@ New-NetFirewallRule -DisplayName "MDDP Plotter (8084)" -Direction Inbound -Proto
 | Service | Port | Script |
 |:---|:---|:---|
 | Portal Gateway | 8080 | `python -m http.server 8080 --directory services\portal` |
-| DAQ Control Panel | 8081 | `services\daq_usb4716\app.py` |
+| DAQ Control Panel | 8081 | `services\daq_navi\app.py` |
 | Musashi IV Panel | 8083 | `services\musashi_iv\app.py` |
 | Plotter Visualizer | 8084 | `services\plotter\app.py` |
 
@@ -405,7 +405,7 @@ New-NetFirewallRule -DisplayName "MDDP Plotter (8084)" -Direction Inbound -Proto
 |:---|:---|:---|
 | Portal Log | `logs\portal.log` | Python http.server log |
 | DAQ Panel Log | `logs\daq_panel.log` | Flask-SocketIO server log |
-| DAQ Pipeline | `services\daq_usb4716\daq_pipeline.log` | Ingestion pipeline stats & errors |
+| DAQ Pipeline | `services\daq_navi\daq_pipeline.log` | Ingestion pipeline stats & errors |
 | Musashi II Panel | `logs\musashi_ii_panel.log` | Flask-SocketIO server log |
 | Musashi II Pipeline | `services\musashi_ii\musashi_ii_pipeline.log` | Musashi II ingestion stats |
 | Musashi IV Panel | `logs\musashi_iv_panel.log` | Flask-SocketIO server log |
@@ -455,7 +455,7 @@ del .portal.pid .daq.pid .musashi_iv.pid .plotter.pid 2>nul
 
 **Solution**:
 - Verify PostgreSQL service status: `sc query postgresql-x64-16` — verify the service is running
-- Verify the DSN in `services\daq_usb4716\config.json` points to the correct host/port
+- Verify the DSN in `services\daq_navi\config.json` points to the correct host/port
 - Test connectivity: `psql -h localhost -U admin -d daq_db`
 
 ### ⚠️ Python Not Found
@@ -475,7 +475,7 @@ del .portal.pid .daq.pid .musashi_iv.pid .plotter.pid 2>nul
 
 **Solution**:
 1. Open **Advantech Navigator** and verify USB-4716 appears in the device list
-2. Check `DEVICE_DESCRIPTION` in `services\daq_usb4716\config.json` matches exactly (e.g., `USB-4716,BID#0`)
+2. Check `DEVICE_DESCRIPTION` in `services\daq_navi\config.json` matches exactly (e.g., `USB-4716,BID#0`)
 3. Try resetting the USB connection (unplug/replug the USB cable)
 4. Verify the DAQNavi Python package is installed: `uv pip show advantech-AutomationBDaq`
 

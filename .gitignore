@@ -6,10 +6,10 @@ __pycache__/
 .musashi_ii.pid
 .musashi_iv.pid
 .plotter.pid
-services/daq_usb4716/.daq_process.pid
-services/daq_usb4716/.daq_process.mode
-services/daq_usb4716/daq_pipeline.log
-services/daq_usb4716/.daq_desired_state.json
+services/daq_navi/.daq_process.pid
+services/daq_navi/.daq_process.mode
+services/daq_navi/daq_pipeline.log
+services/daq_navi/.daq_desired_state.json
 services/musashi_ii/.musashi_ii_process.pid
 services/musashi_ii/.musashi_ii_process.mode
 services/musashi_ii/.musashi_ii_desired_state.json

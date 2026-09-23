@@ -196,7 +196,7 @@ See [DEPLOY_WINDOWS.md](DEPLOY_WINDOWS.md) for complete details on Windows Task 
 
 ## 4. Configuration Documentation
 
-The hardware interface, database connection parameters, and calibration parameters are configured via [services/daq_usb4716/config.json](services/daq_usb4716/config.json).
+The hardware interface, database connection parameters, and calibration parameters are configured via [services/daq_navi/config.json](services/daq_navi/config.json).
 
 ### Output Destination & MQTT Parameters
 | Parameter | Default Value | Description |
@@ -255,7 +255,7 @@ When `DESTINATION` is set to `mqtt`, the DAQ streaming pipeline publishes JSON t
 ### Standalone MQTT-to-DB Subscriber
 To consume telemetry from the MQTT broker and persist it into TimescaleDB:
 ```bash
-uv run services/daq_usb4716/mqtt_to_db.py
+uv run services/daq_navi/mqtt_to_db.py
 ```
 
 ---
@@ -264,7 +264,7 @@ uv run services/daq_usb4716/mqtt_to_db.py
 
 - `services/`: Unified microservices folder.
   - `portal/`: Portal Gateway static site files (`index.html`, `app.js`, `style.css`).
-  - `daq_usb4716/`: DAQ Controller daemon files (`app.py`, `stream_to_db.py`, `mockup_stream_to_db.py`, `mqtt_to_db.py`).
+  - `daq_navi/`: Universal DAQ Navi Controller & Ingestion daemon (`app.py`, `stream_to_db.py`, `mockup_stream_to_db.py`, `mqtt_to_db.py`, `destinations.py`).
   - `musashi_ii/`: Musashi II Dispenser Controller service (`app.py`, `read_musashi.py`, `database_handler.py`).
   - `musashi_iv/`: Musashi IV Dispenser Controller service (`app.py`, `stream_to_db.py`, `api_client.py`).
   - `plotter/`: Database Telemetry Visualizer service (`app.py`, static asset grid layout).

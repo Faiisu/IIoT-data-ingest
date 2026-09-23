@@ -189,7 +189,9 @@ lsof -i :8080 -i :8081 -i :8082 -i :8083 -i :8084
 
 Service processes write background logs or output to stdout/stderr. To monitor individual process log files:
 ```bash
-tail -f services/daq_usb4716/daq_pipeline.log
+tail -f services/daq_navi/daq_pipeline.log
+# Or if running via Docker:
+docker compose logs -f daq-navi
 ```
 
 ---

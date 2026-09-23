@@ -52,9 +52,9 @@ echo "[SYSTEM] Starting Ingestion Portal on Port 8080 (all interfaces)..."
 nohup $PYTHON_BIN -m http.server 8080 --directory services/portal >/dev/null 2>&1 &
 echo $! > "$PORTAL_PID_FILE"
 
-# 2. Start DAQ USB-4716 Control Panel (Port 8081)
+# 2. Start DAQ USB-4716 / DAQNavi Control Panel (Port 8081)
 echo "[SYSTEM] Starting DAQ Control Panel on Port 8081 (all interfaces)..."
-nohup $PYTHON_BIN services/daq_usb4716/app.py >/dev/null 2>&1 &
+nohup $PYTHON_BIN services/daq_navi/app.py >/dev/null 2>&1 &
 echo $! > "$DAQ_PID_FILE"
 
 # 3. Start Musashi II Control Panel (Port 8082)

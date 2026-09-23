@@ -59,9 +59,9 @@ echo [SYSTEM] Starting Ingestion Portal on Port 8080 (all interfaces)...
 start "MDDP_PORTAL_HUB" /min cmd /c "title MDDP_PORTAL_HUB && %PYTHON_BIN% -m http.server 8080 --directory services\portal >> logs\portal.log 2>&1"
 echo 1 > "%PORTAL_PID_FILE%"
 
-rem 2. Start DAQ USB-4716 Control Panel (Port 8081)
+rem 2. Start DAQ USB-4716 / DAQNavi Control Panel (Port 8081)
 echo [SYSTEM] Starting DAQ Control Panel on Port 8081 (all interfaces)...
-start "MDDP_DAQ_PANEL" /min cmd /c "title MDDP_DAQ_PANEL && %PYTHON_BIN% services\daq_usb4716\app.py >> logs\daq_panel.log 2>&1"
+start "MDDP_DAQ_PANEL" /min cmd /c "title MDDP_DAQ_PANEL && %PYTHON_BIN% services\daq_navi\app.py >> logs\daq_panel.log 2>&1"
 echo 1 > "%DAQ_PID_FILE%"
 
 rem 3. Start Musashi II Control Panel (Port 8082)
