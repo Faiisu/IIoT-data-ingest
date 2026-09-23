@@ -1,0 +1,17 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: daq_timescaledb
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: daq_db
+    volumes:
+      - tsdb_data:/var/lib/postgresql/data
+      - ./scripts/sql/db_setup.sql:/docker-entrypoint-initdb.d/01-db-setup.sql
+
+volumes:
+  tsdb_data:

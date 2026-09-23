@@ -1,0 +1,765 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# See: docs/architecture/context.md
+
+"""
+stream_to_db.py
+───────────────
+DAQ USB-4716 → TimescaleDB streaming pipeline
+
+Architecture (2-thread + Queue):
+  ┌──────────────────────────────────────────────────┐
+  │ DAQ Thread  (minimal work — poll + raw enqueue)  │
+  │  getDataF64() → wall-clock stamp → put(raw)      │
+  └─────────────────────┬────────────────────────────┘
+                        │ (batch_wall_ts, raw_data, returned_count)
+                        ▼
+                  Queue (in-memory)
+                        │
+  ┌─────────────────────▼────────────────────────────┐
+  │ DB Writer Thread  (parse + batch INSERT)         │
+  │  get(raw) → compute periodic forward ts → INSERT │
+  └──────────────────────────────────────────────────┘
+
+Key design decisions:
+  - DAQ thread does NO parsing/looping — returns to poll ASAP
+  - DB writer owns all CPU-heavy work (parsing interleaved data)
+  - Queue.put_nowait() — DAQ NEVER blocks waiting for DB
+  - DB writer is non-daemon → flushes queue before process exits
+
+  Time-sync (Periodic Re-anchoring):
+  - Base anchor timestamp is established when streaming starts or reset every RECALIBRATE_INTERVAL_HR.
+  - Per-sample timestamp is forward-computed cumulatively:
+      sample_ts = anchor_time_ns + (samples_since_anchor + s) * dt_ns
+  - This eliminates per-batch jitter across buffer seams while periodically
+    re-synchronizing with wall-clock time to prevent long-term hardware clock drift.
+"""
+
+import sys
+import os
+import time
+import signal
+import threading
+import logging
+import queue
+from datetime import datetime, timezone
+
+import psycopg2
+import psycopg2.extras
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
+try:
+    from Automation.BDaq import *
+    from Automation.BDaq.WaveformAiCtrl import WaveformAiCtrl
+    from Automation.BDaq.BDaqApi import AdxEnumToString, BioFailed
+except (ImportError, OSError) as bdaq_err:
+    WaveformAiCtrl = None
+    def BioFailed(ret):
+        return False
+    def AdxEnumToString(*args):
+        return "BDaq_NOT_LOADED"
+
+from config_loader import load_daq_config
+config = load_daq_config()
+
+# ─── Logging ─────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(threadName)-12s] %(levelname)s: %(message)s",
+)
+log = logging.getLogger(__name__)
+
+# ─── Shared state ─────────────────────────────────────────────────────────────
+# Each item in queue: (batch_wall_ts_ns: int, raw_data: list[float], returned_count: int)
+#   batch_wall_ts_ns = time.time_ns() captured right after getDataF64() returns
+#   Per-sample ts is forward-computed in DB writer relative to periodic anchor:
+#       sample_ts = anchor_time_ns + (samples_since_anchor + s) * dt_ns
+data_queue = queue.Queue(maxsize=config.QUEUE_MAXSIZE)
+stop_event = threading.Event()
+
+stats_lock = threading.Lock()
+stats = {
+    "polled":   0,   # total interleaved samples polled from DAQ
+    "enqueued": 0,   # total batches enqueued
+    "written":  0,   # total rows written to DB
+    "dropped":  0,   # batches dropped due to full queue
+    "db_errors": 0,  # number of DB insert failures
+}
+
+
+# ─── DAQ Reader Thread ────────────────────────────────────────────────────────
+def daq_reader_thread():
+    """
+    Responsibility: poll hardware as fast as possible, enqueue raw data.
+    Does NO parsing — just copies the returned list and enqueues immediately.
+    """
+    try:
+        wf = WaveformAiCtrl(config.DEVICE_DESCRIPTION)
+        wf.loadProfile         = config.PROFILE_PATH
+        wf.conversion.channelStart = config.START_CHANNEL
+        wf.conversion.channelCount = config.CHANNEL_COUNT
+        wf.conversion.clockRate    = config.CLOCK_RATE
+        wf.record.sectionCount     = config.SECTION_COUNT
+        wf.record.sectionLength    = config.SECTION_LENGTH
+
+        for i in range(config.CHANNEL_COUNT):
+            wf.channels[config.START_CHANNEL + i].signalType = AiSignalType.SingleEnded
+            wf.channels[config.START_CHANNEL + i].valueRange = ValueRange.V_0To5
+
+        ret = wf.prepare()
+        if BioFailed(ret):
+            log.error("DAQ prepare() failed — check device connection and profile.xml")
+            stop_event.set()
+            return
+
+        ret = wf.start()
+        if BioFailed(ret):
+            log.error("DAQ start() failed")
+            stop_event.set()
+            return
+
+        log.info(
+            f"DAQ started | device={config.DEVICE_DESCRIPTION} | "
+            f"channels={config.CHANNEL_COUNT} | clock={config.CLOCK_RATE} Hz | "
+            f"sectionLength={config.SECTION_LENGTH} | userBuffer={config.USER_BUFFER_SIZE}"
+        )
+
+        try:
+            log.info("DAQ loop started — periodic wall-clock re-anchoring active")
+
+            while not stop_event.is_set():
+                # Block until USER_BUFFER_SIZE interleaved samples are ready
+                # timeout=-1 means wait indefinitely for requested count
+                result = wf.getDataF64(config.USER_BUFFER_SIZE, -1)
+
+                # ── Capture wall-clock timestamp IMMEDIATELY after getDataF64() returns ──
+                # This is the best approximation of when the LAST sample in this batch
+                # was produced by the hardware. OS scheduling jitter is typically ~1 ms.
+                batch_wall_ts_ns = time.time_ns()
+
+                ret, returned_count, raw_data = result[0], result[1], result[2]
+
+                if BioFailed(ret):
+                    log.error("getDataF64() error — stopping DAQ thread")
+                    stop_event.set()
+                    break
+
+                if returned_count <= 0:
+                    continue
+
+                # ── Minimal work: copy raw list + enqueue immediately ──
+                # DO NOT loop/parse here — let DB writer handle it
+                raw_copy = list(raw_data[:returned_count])
+
+                try:
+                    data_queue.put_nowait((batch_wall_ts_ns, raw_copy, returned_count))
+                    with stats_lock:
+                        stats["polled"]   += returned_count
+                        stats["enqueued"] += 1
+                except queue.Full:
+                    with stats_lock:
+                        stats["dropped"] += 1
+                    log.warning(
+                        f"Queue full! Dropped 1 batch ({returned_count} samples). "                     
+                    )
+
+        finally:
+            wf.stop()
+            wf.release()
+            wf.dispose()
+            log.info("DAQ thread stopped and device released.")
+    except Exception as e:
+        log.exception(f"Unhandled exception in DAQ Reader thread: {e}")
+        stop_event.set()
+
+
+
+# ─── Data Extraction, Calibration, and Storage Components (SRP Design) ───────
+
+class Calibrator:
+    """
+    Responsibility: Handle calibration configuration parsing and scaling calculations.
+    """
+    def __init__(self, start_channel, channel_count, channel_configs):
+        self.calibrations = {}
+        if isinstance(channel_configs, dict):
+            for ch in range(channel_count):
+                ch_num = start_channel + ch
+                cfg_entry = channel_configs.get(ch_num) or channel_configs.get(str(ch_num))
+                if cfg_entry is None:
+                    continue
+                if hasattr(cfg_entry, "scale_enabled"):
+                    if cfg_entry.scale_enabled:
+                        low_volt = cfg_entry.low_voltage
+                        high_volt = cfg_entry.high_voltage
+                        low_val = cfg_entry.low_value
+                        high_val = cfg_entry.high_value
+                        denom = high_volt - low_volt
+                        if abs(denom) > 1e-9:
+                            slope = (high_val - low_val) / denom
+                            self.calibrations[ch] = (low_volt, low_val, slope)
+                elif isinstance(cfg_entry, dict):
+                    scale_cfg = cfg_entry.get("scale", cfg_entry)
+                    if scale_cfg.get("enabled", False):
+                        low_volt = float(scale_cfg.get("low_voltage", 0.0))
+                        high_volt = float(scale_cfg.get("high_voltage", 5.0))
+                        low_val = float(scale_cfg.get("low_value", 0.0))
+                        high_val = float(scale_cfg.get("high_value", 100.0))
+                        denom = high_volt - low_volt
+                        if abs(denom) > 1e-9:
+                            slope = (high_val - low_val) / denom
+                            self.calibrations[ch] = (low_volt, low_val, slope)
+
+    def calibrate(self, ch, value):
+        if ch in self.calibrations:
+            low_volt, low_val, slope = self.calibrations[ch]
+            return low_val + (value - low_volt) * slope
+        return value
+
+
+class DaqSampleParser:
+    """
+    Responsibility: Parse interleaved raw DAQ data and compute timestamps relative to a periodic anchor.
+    Outputs (time, device_id, channel, value) tuples.
+    """
+    def __init__(self, start_channel, channel_count, clock_rate, calibrator, device_id="pci1716-0", recalibrate_interval_hr=24.0):
+        self.start_channel = start_channel
+        self.channel_count = channel_count
+        self.dt_ns = int(1_000_000_000 / clock_rate)
+        self.calibrator = calibrator
+        self.device_id = device_id
+        
+        # Periodic anchor state configuration
+        self.recalibrate_interval_ns = int(recalibrate_interval_hr * 3600 * 1_000_000_000)
+        self.anchor_time_ns = None
+        self.samples_since_anchor = 0
+
+    def parse_batch(self, batch_wall_ts_ns, raw_data, returned_count):
+        samples_per_channel = returned_count // self.channel_count
+        
+        # Re-anchor the base timestamp if not yet set or if the configured interval has elapsed
+        current_time_ns = time.time_ns()
+        if self.anchor_time_ns is None or (current_time_ns - self.anchor_time_ns) >= self.recalibrate_interval_ns:
+            self.anchor_time_ns = batch_wall_ts_ns
+            self.samples_since_anchor = 0
+            
+        rows = []
+        for s in range(samples_per_channel):
+            # Calculate forward timestamp based on cumulative samples since the last anchor
+            sample_ts_ns = self.anchor_time_ns + (self.samples_since_anchor + s) * self.dt_ns
+            sample_ts = datetime.fromtimestamp(sample_ts_ns / 1_000_000_000, tz=timezone.utc)
+            for ch in range(self.channel_count):
+                value = raw_data[s * self.channel_count + ch]
+                value = self.calibrator.calibrate(ch, value)
+                value = round(value, 3)
+                rows.append((sample_ts, self.device_id, self.start_channel + ch, value))
+                
+        # Advance cumulative sample count for the next batch
+        self.samples_since_anchor += samples_per_channel
+        return rows
+
+
+def ensure_db_and_tables(dsn, table_name="daq_telemetry"):
+    """
+    Auto-creates database if missing and auto-creates required tables/hypertable/indexes if missing.
+    Supports configurable table_name with device_id column.
+    """
+    try:
+        import psycopg2.extensions
+        parsed = psycopg2.extensions.make_dsn(dsn)
+        parts = psycopg2.extensions.parse_dsn(parsed)
+        target_dbname = parts.get("dbname")
+
+        if target_dbname:
+            maint_parts = dict(parts)
+            maint_parts["dbname"] = "postgres"
+            maint_dsn = psycopg2.extensions.make_dsn(**maint_parts)
+            try:
+                maint_conn = psycopg2.connect(maint_dsn, connect_timeout=5)
+                maint_conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+                with maint_conn.cursor() as cur:
+                    cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (target_dbname,))
+                    if not cur.fetchone():
+                        log.info(f"[DBSetup] Database '{target_dbname}' does not exist. Creating database...")
+                        cur.execute(f'CREATE DATABASE "{target_dbname}"')
+                        log.info(f"[DBSetup] Database '{target_dbname}' created successfully.")
+                maint_conn.close()
+            except Exception as me:
+                log.warning(f"[DBSetup] Maintenance DB check/creation warning: {me}")
+
+        target_conn = psycopg2.connect(dsn, connect_timeout=5)
+        target_conn.autocommit = True
+        with target_conn.cursor() as cur:
+            try:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS timescaledb;")
+            except Exception:
+                pass
+
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {table_name} (
+                    time        TIMESTAMPTZ      NOT NULL,
+                    device_id   VARCHAR(32)      NOT NULL,
+                    channel     SMALLINT         NOT NULL,
+                    value       DOUBLE PRECISION NOT NULL
+                );
+            """)
+
+            try:
+                cur.execute(f"SELECT create_hypertable('{table_name}', 'time', chunk_time_interval => INTERVAL '1 hour', if_not_exists => TRUE);")
+            except Exception:
+                pass
+
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS idx_{table_name}_device_channel_time
+                    ON {table_name} (device_id, channel, time DESC);
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS daq_sessions (
+                    session_id    VARCHAR(64) PRIMARY KEY,
+                    device_id     VARCHAR(32),
+                    start_time    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    end_time      TIMESTAMPTZ,
+                    channel_count SMALLINT    NOT NULL,
+                    clock_rate    INTEGER     NOT NULL,
+                    config_snapshot JSONB,
+                    mode          VARCHAR(32)
+                );
+            """)
+        target_conn.close()
+        log.info(f"[DBSetup] Database and table schema '{table_name}' verified/auto-created.")
+        return True
+    except Exception as e:
+        log.error(f"[DBSetup] Auto creation of database/tables failed: {e}")
+        return False
+
+
+class TimescaleDBClient:
+    """
+    Responsibility: Manage TimescaleDB connection lifecycle, transactions, and execution.
+    """
+    def __init__(self, dsn, stop_event, dbname=None, table_name="daq_telemetry"):
+        self.dsn = dsn
+        self.stop_event = stop_event
+        self.dbname = dbname
+        self.table_name = table_name
+        self.conn = None
+        self.cur = None
+
+    def connect(self):
+        while not self.stop_event.is_set():
+            try:
+                ensure_db_and_tables(self.dsn, self.table_name)
+                self.conn = psycopg2.connect(self.dsn)
+                self.conn.autocommit = False
+                self.cur = self.conn.cursor()
+                db_desc = f" '{self.dbname}'" if self.dbname else ""
+                log.info(f"Connected to database{db_desc} (table: {self.table_name})")
+                return True
+            except Exception as e:
+                log.error(f"DB connection failed: {e} — retrying in 5s")
+                for _ in range(50):
+                    if self.stop_event.is_set():
+                        return False
+                    time.sleep(0.1)
+        return False
+
+    def insert_samples(self, rows, page_size):
+        if not self.conn or not self.cur:
+            raise RuntimeError("Not connected to database")
+        INSERT_SQL = f"INSERT INTO {self.table_name} (time, device_id, channel, value) VALUES %s"
+        try:
+            psycopg2.extras.execute_values(
+                self.cur, INSERT_SQL, rows, page_size=page_size
+            )
+            self.conn.commit()
+        except Exception as e:
+            self.rollback()
+            log.warning(f"Database insert failed ({e}). Auto-creating database/tables and retrying...")
+            if ensure_db_and_tables(self.dsn, self.table_name):
+                try:
+                    self.conn = psycopg2.connect(self.dsn)
+                    self.conn.autocommit = False
+                    self.cur = self.conn.cursor()
+                    psycopg2.extras.execute_values(
+                        self.cur, INSERT_SQL, rows, page_size=page_size
+                    )
+                    self.conn.commit()
+                    log.info("Insertion succeeded after auto-creating database/tables.")
+                    return
+                except Exception as retry_err:
+                    log.error(f"Retry insertion after auto-creation failed: {retry_err}")
+            raise
+
+    def send_samples(self, rows, page_size=1000):
+        self.insert_samples(rows, page_size=page_size)
+
+    def rollback(self):
+        if self.conn:
+            self.conn.rollback()
+
+    def disconnect(self):
+        if self.cur:
+            try:
+                self.cur.close()
+            except:
+                pass
+            self.cur = None
+        if self.conn:
+            try:
+                self.conn.close()
+            except:
+                pass
+            self.conn = None
+        log.info("Disconnected from database.")
+
+
+class MQTTClient:
+    """
+    Responsibility: Manage MQTT connection lifecycle and publishing telemetry samples to an MQTT broker.
+    """
+    def __init__(self, broker, port, topic, qos=0, username=None, password=None, tls_enabled=False, ca_certs=None, certfile=None, keyfile=None, stop_event=None, client_id="daq_publisher"):
+        self.broker = broker
+        self.port = port
+        self.topic = topic
+        self.qos = qos
+        self.username = username
+        self.password = password
+        self.tls_enabled = tls_enabled
+        self.ca_certs = ca_certs
+        self.certfile = certfile
+        self.keyfile = keyfile
+        self.stop_event = stop_event or threading.Event()
+        self.client_id = client_id
+        self.client = None
+        self.is_connected = False
+
+    def connect(self):
+        try:
+            import paho.mqtt.client as mqtt
+        except ImportError:
+            log.error("paho-mqtt package is not installed. Run 'uv pip install paho-mqtt' to enable MQTT mode.")
+            return False
+
+        while not self.stop_event.is_set():
+            try:
+                try:
+                    self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=self.client_id)
+                except (AttributeError, TypeError):
+                    self.client = mqtt.Client(client_id=self.client_id)
+
+                if self.username:
+                    self.client.username_pw_set(self.username, self.password or None)
+
+                if self.tls_enabled:
+                    ca = self.ca_certs if (self.ca_certs and os.path.exists(self.ca_certs)) else None
+                    cert = self.certfile if (self.certfile and os.path.exists(self.certfile)) else None
+                    key = self.keyfile if (self.keyfile and os.path.exists(self.keyfile)) else None
+                    self.client.tls_set(ca_certs=ca, certfile=cert, keyfile=key)
+
+                def on_connect(client, userdata, flags, rc, properties=None):
+                    if rc == 0 or rc == mqtt.MQTT_ERR_SUCCESS:
+                        self.is_connected = True
+                        log.info(f"Connected to MQTT broker at {self.broker}:{self.port}")
+                    else:
+                        self.is_connected = False
+                        log.error(f"MQTT connection failed with code {rc}")
+
+                def on_disconnect(client, userdata, rc, properties=None):
+                    self.is_connected = False
+                    log.warning("Disconnected from MQTT broker")
+
+                self.client.on_connect = on_connect
+                self.client.on_disconnect = on_disconnect
+                self.client.connect(self.broker, int(self.port), keepalive=60)
+                self.client.loop_start()
+
+                for _ in range(30):
+                    if self.is_connected:
+                        return True
+                    if self.stop_event.is_set():
+                        return False
+                    time.sleep(0.1)
+
+                log.warning(f"MQTT connect timeout ({self.broker}:{self.port}) — retrying in 5s")
+                self.disconnect()
+            except Exception as e:
+                log.error(f"MQTT connection error: {e} — retrying in 5s")
+
+            for _ in range(50):
+                if self.stop_event.is_set():
+                    return False
+                time.sleep(0.1)
+        return False
+
+    def send_samples(self, rows, page_size=1000):
+        if not self.client or not self.is_connected:
+            raise RuntimeError("Not connected to MQTT broker")
+        payload_data = [
+            {
+                "time": r[0].isoformat(),
+                "channel": r[1],
+                "value": r[2]
+            }
+            for r in rows
+        ]
+        payload_json = json.dumps(payload_data)
+        info = self.client.publish(self.topic, payload_json, qos=int(self.qos))
+        if info.rc != 0:
+            raise RuntimeError(f"MQTT publish failed with error code {info.rc}")
+
+    def rollback(self):
+        pass
+
+    def disconnect(self):
+        if self.client:
+            try:
+                self.client.loop_stop()
+                self.client.disconnect()
+            except Exception:
+                pass
+            self.client = None
+        self.is_connected = False
+        log.info("Disconnected from MQTT broker.")
+
+
+class InfluxDBClient:
+    """
+    Responsibility: Manage InfluxDB HTTP Line Protocol telemetry writes.
+    """
+    def __init__(self, url, token, org, bucket, measurement="daq_telemetry", stop_event=None):
+        self.url = (url or "http://localhost:8086").rstrip('/')
+        self.token = token or ""
+        self.org = org or "mddp"
+        self.bucket = bucket or "daq_telemetry"
+        self.measurement = measurement or "daq_telemetry"
+        self.stop_event = stop_event or threading.Event()
+        self.write_url = f"{self.url}/api/v2/write?org={urllib.parse.quote(self.org)}&bucket={urllib.parse.quote(self.bucket)}&precision=s"
+
+    def connect(self):
+        target_url = f"{self.url}/health"
+        headers = {"User-Agent": "USB4716-Writer"}
+        if self.token:
+            headers["Authorization"] = f"Token {self.token}"
+        try:
+            req = urllib.request.Request(target_url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                log.info(f"Connected to InfluxDB at {self.url} (Org: {self.org}, Bucket: {self.bucket})")
+                return True
+        except Exception as e:
+            log.warning(f"InfluxDB health check notice ({e}). Client will attempt line protocol writes.")
+            return True
+
+    def insert_batch(self, batch_tuples):
+        if not batch_tuples:
+            return
+        lines = []
+        for (wall_ts_ns, ch_idx, volt, scaled_val) in batch_tuples:
+            ts_sec = int(wall_ts_ns / 1e9)
+            fields = f"voltage={volt},scaled={scaled_val}"
+            lines.append(f"{self.measurement},ch={ch_idx} {fields} {ts_sec}")
+
+        body = "\n".join(lines).encode('utf-8')
+        headers = {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Accept": "application/json"
+        }
+        if self.token:
+            headers["Authorization"] = f"Token {self.token}"
+
+        req = urllib.request.Request(self.write_url, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            if resp.status not in (200, 204):
+                raise Exception(f"InfluxDB HTTP status {resp.status}")
+
+    def publish_batch(self, batch_tuples):
+        self.insert_batch(batch_tuples)
+
+    def disconnect(self):
+        log.info("InfluxDB client disconnected.")
+
+
+# ─── Data Writer Thread ───────────────────────────────────────────────────────
+def db_writer_thread():
+    """
+    Responsibility: dequeue raw batches, delegate parsing, delegate writing/publishing.
+    Supports TimescaleDB, InfluxDB, and MQTT publishing based on config.DESTINATION.
+    Non-daemon thread — will flush remaining queue items before process exits.
+    """
+    calibrator = Calibrator(
+        start_channel=config.START_CHANNEL,
+        channel_count=config.CHANNEL_COUNT,
+        channel_configs=getattr(config, 'channels', getattr(config, 'CHANNELS', {}))
+    )
+
+    parser = DaqSampleParser(
+        start_channel=config.START_CHANNEL,
+        channel_count=config.CHANNEL_COUNT,
+        clock_rate=config.CLOCK_RATE,
+        calibrator=calibrator,
+        device_id=getattr(config, 'DEVICE_ID', 'pci1716-0'),
+        recalibrate_interval_hr=getattr(config, 'ANCHOR_RECALIBRATE_INTERVAL_HR', 24.0)
+    )
+
+    destination = getattr(config, 'DESTINATION', 'database').lower()
+
+    if destination == 'mqtt':
+        client = MQTTClient(
+            broker=getattr(config, 'MQTT_BROKER', 'localhost'),
+            port=getattr(config, 'MQTT_PORT', 1883),
+            topic=getattr(config, 'MQTT_TOPIC', 'daq/telemetry'),
+            qos=getattr(config, 'MQTT_QOS', 0),
+            username=getattr(config, 'MQTT_USERNAME', ''),
+            password=getattr(config, 'MQTT_PASSWORD', ''),
+            tls_enabled=getattr(config, 'MQTT_TLS_ENABLED', False),
+            ca_certs=getattr(config, 'MQTT_CA_CERTS', ''),
+            certfile=getattr(config, 'MQTT_CLIENT_CERT', ''),
+            keyfile=getattr(config, 'MQTT_CLIENT_KEY', ''),
+            stop_event=stop_event
+        )
+    elif destination == 'influxdb':
+        client = InfluxDBClient(
+            url=getattr(config, 'INFLUX_URL', 'http://localhost:8086'),
+            token=getattr(config, 'INFLUX_TOKEN', ''),
+            org=getattr(config, 'INFLUX_ORG', 'mddp'),
+            bucket=getattr(config, 'INFLUX_BUCKET', 'daq_telemetry'),
+            measurement=getattr(config, 'INFLUX_MEASUREMENT', 'daq_telemetry'),
+            stop_event=stop_event
+        )
+    else:
+        client = TimescaleDBClient(config.DB_DSN, stop_event, table_name=config.DB_TABLE)
+
+    if not client.connect():
+        log.info(f"Writer thread exiting ({destination} connection failed).")
+        return
+
+    log.info(f"Writer thread ready ({destination} mode)...")
+
+    while not stop_event.is_set() or not data_queue.empty():
+        try:
+            batch_wall_ts_ns, raw_data, returned_count = data_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
+
+        # 1. Parse raw data into sample rows
+        rows = parser.parse_batch(batch_wall_ts_ns, raw_data, returned_count)
+
+        # 2. Write/Publish samples (SRP delegation)
+        try:
+            client.send_samples(rows, page_size=config.DB_PAGE_SIZE)
+            with stats_lock:
+                stats["written"] += len(rows)
+        except Exception as e:
+            with stats_lock:
+                stats["db_errors"] += 1
+            log.error(f"Writer output error ({destination}): {e} — attempting recovery...")
+
+            # Attempt rollback
+            try:
+                client.rollback()
+            except Exception as rb_err:
+                log.error(f"Rollback failed: {rb_err} — connection is dead. Closing resources.")
+                client.disconnect()
+
+            # Re-enqueue so data is not lost (best-effort)
+            try:
+                data_queue.put_nowait((batch_wall_ts_ns, raw_data, returned_count))
+            except queue.Full:
+                with stats_lock:
+                    stats["dropped"] += 1
+                log.error("Queue full on re-queue — batch permanently lost!")
+
+            # Reconnect if connection was lost
+            conn_ok = getattr(client, 'is_connected', False) if destination == 'mqtt' else getattr(client, 'conn', None)
+            if not conn_ok:
+                log.info(f"Reconnecting to {destination}...")
+                if not client.connect():
+                    log.error(f"Failed to reconnect to {destination}. Writer thread stopping.")
+                    return
+
+            # Apply rate limiting to prevent tight CPU looping when writer has persistent errors
+            time.sleep(1.0)
+
+    client.disconnect()
+
+
+
+# ─── Monitor Thread ───────────────────────────────────────────────────────────
+def monitor_thread():
+    """Logs pipeline statistics every STATS_INTERVAL_SEC seconds."""
+    while not stop_event.is_set():
+        time.sleep(config.STATS_INTERVAL_SEC)
+        with stats_lock:
+            s = dict(stats)
+        loss_pct = (s["dropped"] / s["enqueued"] * 100) if s["enqueued"] > 0 else 0.0
+        log.info(
+            f"[STATS] polled={s['polled']:,} | written={s['written']:,} | "
+            f"dropped_batches={s['dropped']} ({loss_pct:.1f}%) | "
+            f"db_errors={s['db_errors']} | queue={data_queue.qsize()}/{config.QUEUE_MAXSIZE}"
+        )
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+def main():
+    def handle_signal(sig, frame):
+        log.info(f"Signal {sig} received — initiating graceful shutdown...")
+        stop_event.set()
+
+    signal.signal(signal.SIGINT,  handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    # Windows: SIGBREAK fires on console close / taskkill without /f
+    if sys.platform == "win32":
+        signal.signal(signal.SIGBREAK, handle_signal)
+
+    dest = getattr(config, 'DESTINATION', 'database').lower()
+    log.info("=" * 60)
+    log.info(f"DAQ Streaming Pipeline Starting [Destination: {dest.upper()}]")
+    log.info(f"  Channels    : {config.CHANNEL_COUNT} (ch{config.START_CHANNEL}–ch{config.START_CHANNEL + config.CHANNEL_COUNT - 1})")
+    log.info(f"  Clock rate  : {config.CLOCK_RATE} Hz")
+    log.info(f"  sectionLength: {config.SECTION_LENGTH} samples/ch")
+    log.info(f"  Batch size  : {config.USER_BUFFER_SIZE} interleaved samples (~{config.SECTION_LENGTH / config.CLOCK_RATE * 1000:.0f}ms)")
+    if dest == 'mqtt':
+        log.info(f"  MQTT Broker : {getattr(config, 'MQTT_BROKER', 'localhost')}:{getattr(config, 'MQTT_PORT', 1883)}")
+        log.info(f"  MQTT Topic  : {getattr(config, 'MQTT_TOPIC', 'daq/telemetry')}")
+    else:
+        log.info(f"  DB DSN      : {config.DB_DSN}")
+    log.info("=" * 60)
+
+    daq_thread = threading.Thread(
+        target=daq_reader_thread, name="DAQ-Reader", daemon=True
+    )
+    db_thread = threading.Thread(
+        target=db_writer_thread, name="DB-Writer", daemon=False  # non-daemon: flushes on exit
+    )
+    mon_thread = threading.Thread(
+        target=monitor_thread, name="Monitor", daemon=True
+    )
+
+    daq_thread.start()
+    db_thread.start()
+    mon_thread.start()
+
+    # Wait until stop_event is set (Ctrl+C or DAQ error)
+    stop_event.wait()
+
+    log.info("Waiting for data writer to flush remaining queue...")
+    db_thread.join(timeout=60)
+
+    if db_thread.is_alive():
+        log.warning("Data writer did not finish within 60s timeout.")
+
+    with stats_lock:
+        s = dict(stats)
+    log.info("=" * 60)
+    log.info("Pipeline stopped.")
+    log.info(f"  Total polled   : {s['polled']:,} samples")
+    log.info(f"  Total sent/wrote: {s['written']:,} rows")
+    log.info(f"  Dropped        : {s['dropped']} batches")
+    log.info(f"  Errors         : {s['db_errors']}")
+    log.info("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
+

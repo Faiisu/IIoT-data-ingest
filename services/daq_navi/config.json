@@ -1,0 +1,93 @@
+{
+  "DEVICE_DESCRIPTION": "PCI-1716,BID#0",
+  "DEVICE_ID": "pci1716-0",
+  "PROFILE_PATH": "",
+  "START_CHANNEL": 0,
+  "CHANNEL_COUNT": 2,
+  "CLOCK_RATE": 2000,
+  "SECTION_LENGTH": 500,
+  "SECTION_COUNT": 0,
+  "QUEUE_MAXSIZE": 200,
+  "MOCKUP_MODE": true,
+  "CHANNELS": {
+    "0": {
+      "enabled": true,
+      "label": "pressure-ch0",
+      "signal_type": "SingleEnded",
+      "value_range": "V_0To5",
+      "scale": {
+        "enabled": true,
+        "low_voltage": 1.0,
+        "high_voltage": 5.0,
+        "low_value": -100.0,
+        "high_value": 100.0
+      }
+    },
+    "1": {
+      "enabled": true,
+      "label": "pressure-ch1",
+      "signal_type": "SingleEnded",
+      "value_range": "V_0To5",
+      "scale": {
+        "enabled": true,
+        "low_voltage": 1.0,
+        "high_voltage": 5.0,
+        "low_value": -100.0,
+        "high_value": 100.0
+      }
+    },
+    "2": {
+      "enabled": true,
+      "label": "pressure-3",
+      "signal_type": "SingleEnded",
+      "value_range": "V_0To5",
+      "scale": {
+        "enabled": false,
+        "low_voltage": 0.0,
+        "high_voltage": 5.0,
+        "low_value": 0.0,
+        "high_value": 100.0
+      }
+    },
+    "3": {
+      "enabled": true,
+      "label": "pressure-4",
+      "signal_type": "SingleEnded",
+      "value_range": "V_0To5",
+      "scale": {
+        "enabled": false,
+        "low_voltage": 0.0,
+        "high_voltage": 5.0,
+        "low_value": 0.0,
+        "high_value": 100.0
+      }
+    }
+  },
+  "DESTINATION": "postgresql",
+  "DB_HOST": "localhost",
+  "DB_PORT": "5432",
+  "DB_NAME": "daq_db",
+  "DB_TABLE": "daq_telemetry",
+  "DB_USER": "admin",
+  "DB_PASSWORD": "admin",
+  "DB_DSN": "postgresql://admin:admin@localhost:5432/daq_db",
+  "DB_PAGE_SIZE": 8000,
+  "DB_INSERT_METHOD": "execute_values",
+  "INFLUX_URL": "http://localhost:8086",
+  "INFLUX_ORG": "mddp",
+  "INFLUX_BUCKET": "daq_telemetry",
+  "INFLUX_MEASUREMENT": "daq_telemetry",
+  "INFLUX_TOKEN": "my-influx-token",
+  "MQTT_BROKER": "localhost",
+  "MQTT_PORT": 1883,
+  "MQTT_TOPIC": "daq/telemetry",
+  "MQTT_QOS": 0,
+  "MQTT_USERNAME": "",
+  "MQTT_PASSWORD": "",
+  "MQTT_TLS_ENABLED": false,
+  "MQTT_CA_CERTS": "",
+  "MQTT_CLIENT_CERT": "",
+  "MQTT_CLIENT_KEY": "",
+  "STATS_INTERVAL_SEC": 10,
+  "ANCHOR_RECALIBRATE_INTERVAL_HR": 24
+}
