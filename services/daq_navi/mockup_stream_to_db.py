@@ -30,7 +30,8 @@ from stream_to_db import (
     ensure_db_and_tables,
     TimescaleDBClient,
     MQTTClient,
-    InfluxDBClient
+    InfluxDBClient,
+    create_destination_client
 )
 
 config = load_daq_config()
@@ -164,39 +165,7 @@ def db_writer_thread():
     )
 
     destination = getattr(config, 'DESTINATION', 'postgresql').lower()
-
-    if destination == 'mqtt':
-        client = MQTTClient(
-            broker=getattr(config, 'MQTT_BROKER', 'localhost'),
-            port=getattr(config, 'MQTT_PORT', 1883),
-            topic=getattr(config, 'MQTT_TOPIC', 'daq/telemetry'),
-            qos=getattr(config, 'MQTT_QOS', 0),
-            username=getattr(config, 'MQTT_USERNAME', ''),
-            password=getattr(config, 'MQTT_PASSWORD', ''),
-            tls_enabled=getattr(config, 'MQTT_TLS_ENABLED', False),
-            ca_certs=getattr(config, 'MQTT_CA_CERTS', ''),
-            certfile=getattr(config, 'MQTT_CLIENT_CERT', ''),
-            keyfile=getattr(config, 'MQTT_CLIENT_KEY', ''),
-            stop_event=stop_event
-        )
-    elif destination == 'influxdb':
-        client = InfluxDBClient(
-            url=getattr(config, 'INFLUX_URL', 'http://localhost:8086'),
-            token=getattr(config, 'INFLUX_TOKEN', ''),
-            org=getattr(config, 'INFLUX_ORG', 'mddp'),
-            bucket=getattr(config, 'INFLUX_BUCKET', 'daq_telemetry'),
-            measurement=getattr(config, 'INFLUX_MEASUREMENT', 'daq_telemetry'),
-            stop_event=stop_event
-        )
-    else:
-        client = TimescaleDBClient(
-            dsn=config.DB_DSN,
-            stop_event=stop_event,
-            dbname=config.DB_NAME,
-            table_name=config.DB_TABLE,
-            retention_days=getattr(config, 'DB_RETENTION_DAYS', 90),
-            compression_interval=getattr(config, 'DB_COMPRESSION_INTERVAL', '1 hour')
-        )
+    client = create_destination_client(config, stop_event=stop_event)
 
     if not client.connect():
         log.info(f"[MockWriter] Writer exiting (connection to {destination} failed).")
@@ -254,8 +223,7 @@ def db_writer_thread():
                     with stats_lock:
                         stats["dropped"] += 1
 
-                conn_ok = getattr(client, 'is_connected', False) if destination == 'mqtt' else getattr(client, 'conn', None)
-                if not conn_ok:
+                if not getattr(client, 'is_connected', False):
                     log.info(f"[MockWriter] Reconnecting to {destination}...")
                     if not client.connect():
                         log.error(f"[MockWriter] Reconnection failed. Stopping writer.")
@@ -321,6 +289,10 @@ def main():
     if dest == 'mqtt':
         log.info(f"  MQTT Broker : {config.MQTT_BROKER}:{config.MQTT_PORT}")
         log.info(f"  MQTT Topic  : {config.MQTT_TOPIC}")
+    elif dest in ('influxdb', 'influx'):
+        log.info(f"  Influx URL  : {getattr(config, 'INFLUX_URL', 'http://localhost:8086')}")
+        log.info(f"  Influx Org  : {getattr(config, 'INFLUX_ORG', 'mddp')}")
+        log.info(f"  Influx Bucket: {getattr(config, 'INFLUX_BUCKET', 'daq_telemetry')}")
     else:
         log.info(f"  DB DSN      : {config.DB_DSN}")
     log.info("=" * 60)

@@ -43,6 +43,9 @@ import threading
 import logging
 import queue
 from datetime import datetime, timezone
+import json
+import urllib.request
+import urllib.parse
 
 import psycopg2
 import psycopg2.extras
@@ -441,9 +444,9 @@ class TimescaleDBClient:
     """
     Responsibility: Manage TimescaleDB connection lifecycle, transactions, and execution.
     """
-    def __init__(self, dsn, stop_event, dbname=None, table_name="daq_telemetry", retention_days=None, compression_interval=None):
+    def __init__(self, dsn, stop_event=None, dbname=None, table_name="daq_telemetry", retention_days=None, compression_interval=None):
         self.dsn = dsn
-        self.stop_event = stop_event
+        self.stop_event = stop_event or threading.Event()
         self.dbname = dbname
         self.table_name = table_name
         self.retention_days = retention_days if retention_days is not None else getattr(config, "DB_RETENTION_DAYS", 90)
@@ -496,6 +499,10 @@ class TimescaleDBClient:
                     log.error(f"Retry insertion after auto-creation failed: {retry_err}")
             raise
 
+    @property
+    def is_connected(self):
+        return self.conn is not None and not getattr(self.conn, 'closed', False)
+
     def send_samples(self, rows, page_size=1000):
         self.insert_samples(rows, page_size=page_size)
 
@@ -519,18 +526,26 @@ class TimescaleDBClient:
         log.info("Disconnected from database.")
 
 
+def _chunk_rows(rows, page_size=1000):
+    if not rows:
+        return
+    step = page_size if page_size and page_size > 0 else len(rows)
+    for i in range(0, len(rows), step):
+        yield rows[i:i + step]
+
+
 class MQTTClient:
     """
     Responsibility: Manage MQTT connection lifecycle and publishing telemetry samples to an MQTT broker.
     """
-    def __init__(self, broker, port, topic, qos=0, username=None, password=None, tls_enabled=False, ca_certs=None, certfile=None, keyfile=None, stop_event=None, client_id="daq_publisher"):
+    def __init__(self, broker="localhost", port=1883, topic="daq/telemetry", qos=0, username=None, password=None, tls_enabled=False, ca_certs=None, certfile=None, keyfile=None, stop_event=None, client_id="daq_publisher"):
         self.broker = broker
-        self.port = port
+        self.port = int(port)
         self.topic = topic
-        self.qos = qos
+        self.qos = int(qos)
         self.username = username
         self.password = password
-        self.tls_enabled = tls_enabled
+        self.tls_enabled = bool(tls_enabled)
         self.ca_certs = ca_certs
         self.certfile = certfile
         self.keyfile = keyfile
@@ -562,15 +577,16 @@ class MQTTClient:
                     key = self.keyfile if (self.keyfile and os.path.exists(self.keyfile)) else None
                     self.client.tls_set(ca_certs=ca, certfile=cert, keyfile=key)
 
-                def on_connect(client, userdata, flags, rc, properties=None):
-                    if rc == 0 or rc == mqtt.MQTT_ERR_SUCCESS:
+                def on_connect(client, userdata, *args, **kwargs):
+                    rc = args[1] if len(args) > 1 else args[0] if args else 0
+                    if rc == 0 or rc == getattr(mqtt, "MQTT_ERR_SUCCESS", 0):
                         self.is_connected = True
                         log.info(f"Connected to MQTT broker at {self.broker}:{self.port}")
                     else:
                         self.is_connected = False
                         log.error(f"MQTT connection failed with code {rc}")
 
-                def on_disconnect(client, userdata, rc, properties=None):
+                def on_disconnect(client, userdata, *args, **kwargs):
                     self.is_connected = False
                     log.warning("Disconnected from MQTT broker")
 
@@ -600,18 +616,33 @@ class MQTTClient:
     def send_samples(self, rows, page_size=1000):
         if not self.client or not self.is_connected:
             raise RuntimeError("Not connected to MQTT broker")
-        payload_data = [
-            {
-                "time": r[0].isoformat(),
-                "channel": r[1],
-                "value": r[2]
-            }
-            for r in rows
-        ]
-        payload_json = json.dumps(payload_data)
-        info = self.client.publish(self.topic, payload_json, qos=int(self.qos))
-        if info.rc != 0:
-            raise RuntimeError(f"MQTT publish failed with error code {info.rc}")
+        if not rows:
+            return
+
+        for chunk in _chunk_rows(rows, page_size):
+            payload_data = []
+            for r in chunk:
+                ts = r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0])
+                if len(r) == 3:
+                    dev_id = self.client_id
+                    ch = int(r[1])
+                    val = float(r[2])
+                elif len(r) >= 4:
+                    dev_id = str(r[1])
+                    ch = int(r[2])
+                    val = float(r[3])
+                else:
+                    raise ValueError(f"Unsupported row format: {r}")
+                payload_data.append({
+                    "time": ts,
+                    "device_id": dev_id,
+                    "channel": ch,
+                    "value": val
+                })
+            payload_json = json.dumps(payload_data)
+            info = self.client.publish(self.topic, payload_json, qos=int(self.qos))
+            if hasattr(info, "rc") and info.rc != 0:
+                raise RuntimeError(f"MQTT publish failed with error code {info.rc}")
 
     def rollback(self):
         pass
@@ -632,7 +663,7 @@ class InfluxDBClient:
     """
     Responsibility: Manage InfluxDB HTTP Line Protocol telemetry writes.
     """
-    def __init__(self, url, token, org, bucket, measurement="daq_telemetry", stop_event=None):
+    def __init__(self, url="http://localhost:8086", token=None, org="mddp", bucket="daq_telemetry", measurement="daq_telemetry", stop_event=None):
         self.url = (url or "http://localhost:8086").rstrip('/')
         self.token = token or ""
         self.org = org or "mddp"
@@ -640,6 +671,7 @@ class InfluxDBClient:
         self.measurement = measurement or "daq_telemetry"
         self.stop_event = stop_event or threading.Event()
         self.write_url = f"{self.url}/api/v2/write?org={urllib.parse.quote(self.org)}&bucket={urllib.parse.quote(self.bucket)}&precision=s"
+        self.is_connected = False
 
     def connect(self):
         target_url = f"{self.url}/health"
@@ -649,39 +681,120 @@ class InfluxDBClient:
         try:
             req = urllib.request.Request(target_url, headers=headers, method="GET")
             with urllib.request.urlopen(req, timeout=3.0) as resp:
-                log.info(f"Connected to InfluxDB at {self.url} (Org: {self.org}, Bucket: {self.bucket})")
-                return True
+                if resp.status == 200:
+                    self.is_connected = True
+                    log.info(f"Connected to InfluxDB at {self.url} (Org: {self.org}, Bucket: {self.bucket})")
+                    return True
+                else:
+                    self.is_connected = False
+                    log.error(f"InfluxDB health check returned status {resp.status}")
+                    return False
         except Exception as e:
-            log.warning(f"InfluxDB health check notice ({e}). Client will attempt line protocol writes.")
-            return True
+            self.is_connected = False
+            log.warning(f"InfluxDB connection failed ({e}).")
+            return False
 
-    def insert_batch(self, batch_tuples):
-        if not batch_tuples:
+    def format_line(self, row):
+        """
+        Formats a single sample tuple into an InfluxDB line protocol string.
+        Accepts:
+          - 5-tuple: (ts, device_id, channel, voltage, scaled)
+          - 4-tuple: (ts, device_id, channel, value)
+          - legacy 4-tuple: (ts_ns, ch, volt, scaled)
+        """
+        if len(row) >= 5:
+            ts, dev_id, ch, volt, scaled = row[0], row[1], row[2], row[3], row[4]
+            fields = f"voltage={volt},scaled={scaled}"
+        elif len(row) == 4:
+            if isinstance(row[1], str):
+                ts, dev_id, ch, val = row[0], row[1], row[2], row[3]
+                fields = f"voltage={val},scaled={val}"
+            else:
+                ts, ch, volt, scaled = row[0], row[1], row[2], row[3]
+                dev_id = "default"
+                fields = f"voltage={volt},scaled={scaled}"
+        elif len(row) == 3:
+            ts, ch, val = row[0], row[1], row[2]
+            dev_id = "default"
+            fields = f"voltage={val},scaled={val}"
+        else:
+            raise ValueError(f"Unsupported row format: {row}")
+
+        if hasattr(ts, "timestamp"):
+            ts_sec = int(ts.timestamp())
+        elif isinstance(ts, (int, float)):
+            ts_sec = int(ts / 1e9) if ts > 1e11 else int(ts)
+        else:
+            ts_sec = int(datetime.fromisoformat(str(ts)).timestamp())
+
+        return f"{self.measurement},device_id={dev_id},ch={ch} {fields} {ts_sec}"
+
+    def send_samples(self, rows, page_size=1000):
+        if not rows:
             return
-        lines = []
-        for (wall_ts_ns, ch_idx, volt, scaled_val) in batch_tuples:
-            ts_sec = int(wall_ts_ns / 1e9)
-            fields = f"voltage={volt},scaled={scaled_val}"
-            lines.append(f"{self.measurement},ch={ch_idx} {fields} {ts_sec}")
+        for chunk in _chunk_rows(rows, page_size):
+            lines = [self.format_line(r) for r in chunk]
+            body = "\n".join(lines).encode('utf-8')
+            headers = {
+                "Content-Type": "text/plain; charset=utf-8",
+                "Accept": "application/json"
+            }
+            if self.token:
+                headers["Authorization"] = f"Token {self.token}"
 
-        body = "\n".join(lines).encode('utf-8')
-        headers = {
-            "Content-Type": "text/plain; charset=utf-8",
-            "Accept": "application/json"
-        }
-        if self.token:
-            headers["Authorization"] = f"Token {self.token}"
+            req = urllib.request.Request(self.write_url, data=body, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                if resp.status not in (200, 204):
+                    raise RuntimeError(f"InfluxDB HTTP status {resp.status}")
 
-        req = urllib.request.Request(self.write_url, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=4.0) as resp:
-            if resp.status not in (200, 204):
-                raise Exception(f"InfluxDB HTTP status {resp.status}")
-
-    def publish_batch(self, batch_tuples):
-        self.insert_batch(batch_tuples)
+    def rollback(self):
+        pass
 
     def disconnect(self):
+        self.is_connected = False
         log.info("InfluxDB client disconnected.")
+
+
+def create_destination_client(cfg, stop_event=None):
+    """
+    Factory function to instantiate the active destination client based on config.DESTINATION.
+    Supports 'postgresql' (TimescaleDBClient), 'mqtt' (MQTTClient), and 'influxdb' (InfluxDBClient).
+    """
+    dest = getattr(cfg, 'DESTINATION', 'postgresql').lower()
+    if dest == 'mqtt':
+        return MQTTClient(
+            broker=getattr(cfg, 'MQTT_BROKER', 'localhost'),
+            port=getattr(cfg, 'MQTT_PORT', 1883),
+            topic=getattr(cfg, 'MQTT_TOPIC', 'daq/telemetry'),
+            qos=getattr(cfg, 'MQTT_QOS', 0),
+            username=getattr(cfg, 'MQTT_USERNAME', None),
+            password=getattr(cfg, 'MQTT_PASSWORD', None),
+            tls_enabled=getattr(cfg, 'MQTT_TLS_ENABLED', False),
+            ca_certs=getattr(cfg, 'MQTT_CA_CERTS', None),
+            certfile=getattr(cfg, 'MQTT_CLIENT_CERT', None),
+            keyfile=getattr(cfg, 'MQTT_CLIENT_KEY', None),
+            stop_event=stop_event,
+            client_id=getattr(cfg, 'MQTT_CLIENT_ID', 'daq_publisher')
+        )
+    elif dest == 'influxdb':
+        return InfluxDBClient(
+            url=getattr(cfg, 'INFLUX_URL', 'http://localhost:8086'),
+            token=getattr(cfg, 'INFLUX_TOKEN', ''),
+            org=getattr(cfg, 'INFLUX_ORG', 'mddp'),
+            bucket=getattr(cfg, 'INFLUX_BUCKET', 'daq_telemetry'),
+            measurement=getattr(cfg, 'INFLUX_MEASUREMENT', 'daq_telemetry'),
+            stop_event=stop_event
+        )
+    else:
+        dsn = getattr(cfg, 'DB_DSN', None) or f"postgresql://{getattr(cfg, 'DB_USER', 'postgres')}:{getattr(cfg, 'DB_PASSWORD', '')}@{getattr(cfg, 'DB_HOST', 'localhost')}:{getattr(cfg, 'DB_PORT', 5432)}/{getattr(cfg, 'DB_NAME', 'daq_telemetry')}"
+        return TimescaleDBClient(
+            dsn=dsn,
+            stop_event=stop_event,
+            dbname=getattr(cfg, 'DB_NAME', 'daq_telemetry'),
+            table_name=getattr(cfg, 'DB_TABLE', 'daq_telemetry'),
+            retention_days=getattr(cfg, 'DB_RETENTION_DAYS', 90),
+            compression_interval=getattr(cfg, 'DB_COMPRESSION_INTERVAL', '1 hour')
+        )
 
 
 # ─── Data Writer Thread ───────────────────────────────────────────────────────
@@ -707,38 +820,7 @@ def db_writer_thread():
     )
 
     destination = getattr(config, 'DESTINATION', 'database').lower()
-
-    if destination == 'mqtt':
-        client = MQTTClient(
-            broker=getattr(config, 'MQTT_BROKER', 'localhost'),
-            port=getattr(config, 'MQTT_PORT', 1883),
-            topic=getattr(config, 'MQTT_TOPIC', 'daq/telemetry'),
-            qos=getattr(config, 'MQTT_QOS', 0),
-            username=getattr(config, 'MQTT_USERNAME', ''),
-            password=getattr(config, 'MQTT_PASSWORD', ''),
-            tls_enabled=getattr(config, 'MQTT_TLS_ENABLED', False),
-            ca_certs=getattr(config, 'MQTT_CA_CERTS', ''),
-            certfile=getattr(config, 'MQTT_CLIENT_CERT', ''),
-            keyfile=getattr(config, 'MQTT_CLIENT_KEY', ''),
-            stop_event=stop_event
-        )
-    elif destination == 'influxdb':
-        client = InfluxDBClient(
-            url=getattr(config, 'INFLUX_URL', 'http://localhost:8086'),
-            token=getattr(config, 'INFLUX_TOKEN', ''),
-            org=getattr(config, 'INFLUX_ORG', 'mddp'),
-            bucket=getattr(config, 'INFLUX_BUCKET', 'daq_telemetry'),
-            measurement=getattr(config, 'INFLUX_MEASUREMENT', 'daq_telemetry'),
-            stop_event=stop_event
-        )
-    else:
-        client = TimescaleDBClient(
-            config.DB_DSN,
-            stop_event,
-            table_name=config.DB_TABLE,
-            retention_days=config.DB_RETENTION_DAYS,
-            compression_interval=getattr(config, 'DB_COMPRESSION_INTERVAL', '1 hour')
-        )
+    client = create_destination_client(config, stop_event=stop_event)
 
     if not client.connect():
         log.info(f"Writer thread exiting ({destination} connection failed).")
@@ -781,8 +863,7 @@ def db_writer_thread():
                 log.error("Queue full on re-queue — batch permanently lost!")
 
             # Reconnect if connection was lost
-            conn_ok = getattr(client, 'is_connected', False) if destination == 'mqtt' else getattr(client, 'conn', None)
-            if not conn_ok:
+            if not getattr(client, 'is_connected', False):
                 log.info(f"Reconnecting to {destination}...")
                 if not client.connect():
                     log.error(f"Failed to reconnect to {destination}. Writer thread stopping.")
