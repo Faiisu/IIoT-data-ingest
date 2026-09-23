@@ -18,6 +18,13 @@ if [ -z "$MOCKUP" ] && [ -f "config.json" ]; then
     MOCKUP=$($PY -c "import json; print(json.load(open('config.json')).get('MOCKUP_MODE', 'false'))" 2>/dev/null || echo "false")
 fi
 
+# Web GUI mode vs Headless Daemon mode
+# When ENABLE_WEB_UI is true (default), launches app.py which binds port 8081 and manages streaming
+if [ "${ENABLE_WEB_UI:-true}" = "true" ] && [ "${HEADLESS:-false}" != "true" ]; then
+    echo "[DAQ-Navi Entrypoint] Launching DAQ Control Panel Web GUI on port 8081 (app.py)..."
+    exec $PY app.py "$@"
+fi
+
 # If hardware mode is requested but driver library is missing, fallback to mockup with warning
 case "$MOCKUP" in
     [Tt][Rr][Uu][Ee]|1)

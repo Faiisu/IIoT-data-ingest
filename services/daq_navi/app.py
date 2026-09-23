@@ -471,6 +471,18 @@ def handle_start(data):
         # Start log tailer thread
         start_tailing()
         
+        # Monitor initial process startup; auto-fallback to mockup if hardware fails
+        def check_initial_exit(p, mode_attempted):
+            time.sleep(1.5)
+            if p.poll() is not None and p.returncode != 0:
+                print(f"[SYSTEM] Process exited with code {p.returncode} in mode={mode_attempted.upper()}")
+                if os.getenv("AUTO_FALLBACK", "true").lower() in ("true", "1", "yes") and mode_attempted != "mockup":
+                    print("[SYSTEM] Hardware device failed. Auto-falling back to MOCKUP pipeline...")
+                    socketio.emit('log_update', {'log': '[SYSTEM] Hardware device failed. Auto-falling back to MOCKUP pipeline...'})
+                    handle_start({'mode': 'mockup'})
+
+        threading.Thread(target=check_initial_exit, args=(proc, run_mode), daemon=True).start()
+        
     except Exception as e:
         socketio.emit('log_update', {'log': f'[SYSTEM] Failed to spawn process: {e}'})
 
@@ -523,12 +535,30 @@ def init_application():
         auto_start_enabled = cfg.get('AUTO_START_ON_STARTUP', True)
         is_desired_running = desired_state.get('is_running', False)
         
+        env_mockup = os.getenv("MOCKUP_MODE", "").lower() in ("true", "1", "yes")
+        env_mode = os.getenv("AUTO_START_MODE")
+        
         if auto_start_enabled or is_desired_running:
-            target_mode = cfg.get('AUTO_START_MODE') or desired_state.get('mode', 'mockup')
+            if env_mode:
+                target_mode = env_mode.lower()
+            elif env_mockup:
+                target_mode = "mockup"
+            else:
+                target_mode = cfg.get('AUTO_START_MODE') or desired_state.get('mode', 'mockup')
             print(f"[SYSTEM] Startup config AUTO_START_ON_STARTUP is enabled. Auto-starting DAQ ingestion in MODE={target_mode.upper()}...")
             handle_start({'mode': target_mode})
         else:
             print("[SYSTEM] Startup config AUTO_START_ON_STARTUP is disabled. Awaiting manual start trigger.")
+
+def handle_shutdown(sig, frame):
+    print("[SYSTEM] Gracefully shutting down Web GUI and sub-pipeline...")
+    pid, _ = get_running_process()
+    if pid is not None:
+        terminate_pid(pid)
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, handle_shutdown)
+signal.signal(signal.SIGTERM, handle_shutdown)
 
 if __name__ == '__main__':
     init_application()

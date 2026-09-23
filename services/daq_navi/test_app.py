@@ -9,7 +9,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from services.daq_usb4716.app import app
+from services.daq_navi.app import app
 
 
 class TestDaqUsb4716App(unittest.TestCase):

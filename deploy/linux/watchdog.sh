@@ -116,9 +116,9 @@ check_and_recover() {
   fi
 
   # 2. Port Availability Checks
-  # Ports: 5432 (TimescaleDB), 8080 (Portal), 8084 (Plotter)
+  # Ports: 5432 (TimescaleDB), 8080 (Portal), 8081 (DAQ Panel), 8084 (Plotter)
   local down_ports=()
-  local required_ports=(5432 8080 8084)
+  local required_ports=(5432 8080 8081 8084)
 
   for p in "${required_ports[@]}"; do
     if ! check_port "127.0.0.1" "$p"; then
