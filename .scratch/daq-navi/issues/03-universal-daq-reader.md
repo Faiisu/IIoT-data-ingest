@@ -4,12 +4,17 @@
 
 **Blocked by:** 01: Config schema + DB schema + config loader
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] `daq_reader_thread` reads `DEVICE_DESCRIPTION` from config (no hardcoded device string)
-- [ ] Per-channel `signal_type` applied from config via `wf.channels[i].signalType`
-- [ ] Per-channel `value_range` applied from config via `wf.channels[i].valueRange`
-- [ ] Acquisition parameters (`clockRate`, `sectionLength`, `sectionCount`) read from config
-- [ ] `loadProfile` is optional: skipped gracefully if `PROFILE_PATH` is empty or missing
-- [ ] Startup log clearly shows device description, per-channel config summary, and acquisition parameters
-- [ ] Verified: changing `DEVICE_DESCRIPTION` in config.json switches the target device without any code modification
+- [x] `daq_reader_thread` reads `DEVICE_DESCRIPTION` from config (no hardcoded device string)
+- [x] Per-channel `signal_type` applied from config via `wf.channels[i].signalType`
+- [x] Per-channel `value_range` applied from config via `wf.channels[i].valueRange`
+- [x] Acquisition parameters (`clockRate`, `sectionLength`, `sectionCount`) read from config
+- [x] `loadProfile` is optional: skipped gracefully if `PROFILE_PATH` is empty or missing
+- [x] Startup log clearly shows device description, per-channel config summary, and acquisition parameters
+- [x] Verified live on real hardware: tested on `mic-770` with physical PCI-1716 card (`03:00.0 Advantech Co. Ltd Device 00b5`), reading ch0 and ch1 (SingleEnded / common ground with DP-101A sensors) streaming 20,000 samples at 2000 Hz into containerized TimescaleDB with 0 dropped batches and clean shutdown.
+
+## Answer
+Implemented in:
+- `services/daq_navi/stream_to_db.py`: `daq_reader_thread` refactored to dynamically read `DEVICE_DESCRIPTION`, per-channel `signalType` and `valueRange`, and acquisition parameters from `config.json`. Safely handles missing profile XML and cleans up device handles on termination.
+- Verified on remote machine `mic-770@100.85.124.109` with physical PCI-1716 hardware card writing live samples to `daq_telemetry`.
