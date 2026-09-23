@@ -178,9 +178,16 @@ def daq_reader_thread():
                     )
 
         finally:
-            wf.stop()
-            wf.release()
-            wf.dispose()
+            try:
+                if hasattr(wf, 'stop'):
+                    wf.stop()
+            except Exception:
+                pass
+            try:
+                if hasattr(wf, 'dispose'):
+                    wf.dispose()
+            except Exception:
+                pass
             log.info("DAQ thread stopped and device released.")
     except Exception as e:
         log.exception(f"Unhandled exception in DAQ Reader thread: {e}")
