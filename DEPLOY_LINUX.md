@@ -4,9 +4,26 @@ This document provides step-by-step instructions for deploying the MDDP Ingestio
 
 ---
 
+## Quick Start: Interactive Production Setup Wizard
+
+For an automated, guided setup on a fresh Linux server with Advantech PCI/USB DAQ cards and Docker, run:
+
+```bash
+# Non-interactive prerequisite inspection:
+./scripts/setup_wizard.sh --check-only
+
+# Interactive guided setup:
+./scripts/setup_wizard.sh
+```
+
+The wizard validates kernel compatibility, scans for PCI-1716 hardware, checks/guides DAQNavi driver installation, provisions Docker and Docker Compose, configures `.env` and `config.json`, and launches the containerized stack with health verification.
+
+---
+
 ## Table of Contents
 
-1. [Prerequisites](#1-prerequisites)
+1. [Interactive Setup Wizard (Recommended)](#quick-start-interactive-production-setup-wizard)
+2. [Prerequisites](#1-prerequisites)
 2. [Database & Broker Setup](#2-database--broker-setup)
 3. [Project Setup & Dependencies](#3-project-setup--dependencies)
 4. [Service Startup & Management](#4-service-startup--management)

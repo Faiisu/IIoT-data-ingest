@@ -159,6 +159,22 @@ See [DEPLOY_LINUX.md](DEPLOY_LINUX.md) for full instructions and hardware connec
 
 ---
 
+### Option C: Containerized Full-Stack & Interactive Setup Wizard (Linux)
+
+For production deployment with containerized services (TimescaleDB, Mosquitto, InfluxDB, Portal, Plotter, and DAQ Navi), run the interactive setup wizard:
+
+```bash
+# Non-interactive prerequisite check:
+./scripts/setup_wizard.sh --check-only
+
+# Interactive step-by-step setup wizard:
+./scripts/setup_wizard.sh
+```
+
+The wizard inspects Linux kernel and OS prerequisites, checks for Advantech PCI-1716 hardware via `lspci`, guides driver installation, provisions Docker and Docker Compose, configures `.env` and `config.json`, and launches the full stack with health checks.
+
+---
+
 ### Option B: Windows Deployment (Script-Based)
 
 For 24/7 unattended Windows operation with native Advantech USB-4716 hardware drivers:
