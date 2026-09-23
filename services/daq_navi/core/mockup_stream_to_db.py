@@ -22,18 +22,36 @@ import queue
 import csv
 from datetime import datetime, timezone
 
-sys.path.append(os.path.dirname(__file__))
-from config_loader import load_daq_config
-from stream_to_db import (
-    Calibrator,
-    DaqSampleParser,
-    ensure_db_and_tables,
-    TimescaleDBClient,
-    MQTTClient,
-    InfluxDBClient,
-    create_destination_client,
-    check_pipeline_watchdog
-)
+CORE_DIR = os.path.dirname(os.path.abspath(__file__))
+SERVICE_DIR = os.path.dirname(CORE_DIR)
+for p in (CORE_DIR, SERVICE_DIR):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+try:
+    from .config_loader import load_daq_config
+    from .stream_to_db import (
+        Calibrator,
+        DaqSampleParser,
+        ensure_db_and_tables,
+        TimescaleDBClient,
+        MQTTClient,
+        InfluxDBClient,
+        create_destination_client,
+        check_pipeline_watchdog
+    )
+except ImportError:
+    from config_loader import load_daq_config
+    from stream_to_db import (
+        Calibrator,
+        DaqSampleParser,
+        ensure_db_and_tables,
+        TimescaleDBClient,
+        MQTTClient,
+        InfluxDBClient,
+        create_destination_client,
+        check_pipeline_watchdog
+    )
 
 config = load_daq_config()
 

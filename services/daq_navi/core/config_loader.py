@@ -146,7 +146,14 @@ class DaqNaviConfig:
 
 def load_daq_config(config_path: str = None) -> DaqNaviConfig:
     if config_path is None:
-        config_path = os.path.join(os.path.dirname(__file__), "config.json")
+        p1 = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+        p2 = os.path.join(os.path.dirname(__file__), "config.json")
+        if os.path.exists(p1):
+            config_path = p1
+        elif os.path.exists(p2):
+            config_path = p2
+        else:
+            config_path = p1
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Config file not found: {config_path}")
     with open(config_path, "r", encoding="utf-8") as f:

@@ -13,13 +13,19 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, os.path.dirname(__file__))
+SERVICE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CORE_DIR = os.path.join(SERVICE_DIR, "core")
+PROJECT_ROOT = os.path.abspath(os.path.join(SERVICE_DIR, "..", ".."))
+for p in (CORE_DIR, SERVICE_DIR, PROJECT_ROOT):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
 from config_loader import load_daq_config
 from stream_to_db import Calibrator, DaqSampleParser, TimescaleDBClient
 
 class TestPipelineE2E(unittest.TestCase):
     def setUp(self):
-        self.config_path = os.path.join(os.path.dirname(__file__), "config.json")
+        self.config_path = os.path.join(SERVICE_DIR, "config.json")
         self.cfg = load_daq_config(self.config_path)
 
     def test_dp101a_calibration(self):

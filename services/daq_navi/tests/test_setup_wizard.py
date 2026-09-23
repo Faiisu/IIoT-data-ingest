@@ -2,9 +2,10 @@ import os
 import subprocess
 import unittest
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+SERVICE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.abspath(os.path.join(SERVICE_DIR, "../.."))
 WIZARD_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "setup_wizard.sh")
-CONFIG_JSON_PATH = os.path.join(PROJECT_ROOT, "services", "daq_navi", "config.json")
+CONFIG_JSON_PATH = os.path.join(SERVICE_DIR, "config.json")
 
 
 class TestSetupWizard(unittest.TestCase):

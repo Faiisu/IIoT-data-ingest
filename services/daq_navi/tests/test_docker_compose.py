@@ -18,13 +18,19 @@ import sys
 import unittest
 import yaml
 
-sys.path.insert(0, os.path.dirname(__file__))
+SERVICE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CORE_DIR = os.path.join(SERVICE_DIR, "core")
+PROJECT_ROOT = os.path.abspath(os.path.join(SERVICE_DIR, "..", ".."))
+for p in (CORE_DIR, SERVICE_DIR, PROJECT_ROOT):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
 from config_loader import load_daq_config, DaqNaviConfig
 
 
 class TestDockerComposeStack(unittest.TestCase):
     def setUp(self):
-        self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        self.project_root = PROJECT_ROOT
         self.compose_path = os.path.join(self.project_root, "docker-compose.yml")
         self.env_example_path = os.path.join(self.project_root, ".env.example")
         self.mosquitto_conf_path = os.path.join(self.project_root, "config", "mosquitto", "mosquitto.conf")
@@ -145,7 +151,7 @@ class TestDockerComposeStack(unittest.TestCase):
         self.assertIn("stream_to_db.py", ep_content)
 
     def test_config_loader_env_overrides(self):
-        config_path = os.path.join(os.path.dirname(__file__), "config.json")
+        config_path = os.path.join(SERVICE_DIR, "config.json")
         base_cfg = load_daq_config(config_path)
 
         os.environ["MOCKUP_MODE"] = "true"

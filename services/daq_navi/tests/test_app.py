@@ -5,9 +5,11 @@ import os
 import sys
 import unittest
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+SERVICE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.abspath(os.path.join(SERVICE_DIR, '..', '..'))
+for path in (PROJECT_ROOT, SERVICE_DIR):
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 from services.daq_navi.app import app
 
@@ -54,7 +56,9 @@ class TestDaqUsb4716App(unittest.TestCase):
 
     def test_host_binding_verification(self):
         """Verify entrypoint specifies host='0.0.0.0' for LAN edge deployment."""
-        app_py_path = os.path.join(os.path.dirname(__file__), 'app.py')
+        app_py_path = os.path.join(SERVICE_DIR, 'app.py')
+        if not os.path.exists(app_py_path):
+            app_py_path = os.path.join(SERVICE_DIR, 'web', 'app.py')
         with open(app_py_path, 'r', encoding='utf-8') as f:
             content = f.read()
         self.assertIn("host='0.0.0.0'", content)

@@ -11,12 +11,18 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, os.path.dirname(__file__))
+SERVICE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CORE_DIR = os.path.join(SERVICE_DIR, "core")
+PROJECT_ROOT = os.path.abspath(os.path.join(SERVICE_DIR, "..", ".."))
+for p in (CORE_DIR, SERVICE_DIR, PROJECT_ROOT):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
 from config_loader import load_daq_config, DaqNaviConfig, ChannelConfig
 
 class TestConfigAndSchema(unittest.TestCase):
     def test_load_default_config(self):
-        config_path = os.path.join(os.path.dirname(__file__), "config.json")
+        config_path = os.path.join(SERVICE_DIR, "config.json")
         cfg = load_daq_config(config_path)
         
         self.assertEqual(cfg.DEVICE_ID, "pci1716-0")
@@ -44,7 +50,7 @@ class TestConfigAndSchema(unittest.TestCase):
         self.assertEqual(ch0.high_value, 100.0)
 
     def test_sql_schema_file_exists_and_contains_table(self):
-        sql_path = os.path.join(os.path.dirname(__file__), "scripts", "sql", "db_setup.sql")
+        sql_path = os.path.join(SERVICE_DIR, "scripts", "sql", "db_setup.sql")
         self.assertTrue(os.path.exists(sql_path), "db_setup.sql must exist")
         with open(sql_path, "r", encoding="utf-8") as f:
             content = f.read()

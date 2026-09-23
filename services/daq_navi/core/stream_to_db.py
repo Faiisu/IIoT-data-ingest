@@ -50,7 +50,12 @@ import urllib.parse
 import psycopg2
 import psycopg2.extras
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
+CORE_DIR = os.path.dirname(os.path.abspath(__file__))
+SERVICE_DIR = os.path.dirname(CORE_DIR)
+for p in (CORE_DIR, SERVICE_DIR):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
 try:
     from Automation.BDaq import *
     from Automation.BDaq.WaveformAiCtrl import WaveformAiCtrl
@@ -62,7 +67,10 @@ except (ImportError, OSError) as bdaq_err:
     def AdxEnumToString(*args):
         return "BDaq_NOT_LOADED"
 
-from config_loader import load_daq_config
+try:
+    from .config_loader import load_daq_config
+except ImportError:
+    from config_loader import load_daq_config
 config = load_daq_config()
 
 # ─── Logging ─────────────────────────────────────────────────────────────────

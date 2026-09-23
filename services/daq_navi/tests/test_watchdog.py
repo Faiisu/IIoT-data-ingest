@@ -12,8 +12,12 @@ import time
 import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
-
-sys.path.append(os.path.dirname(__file__))
+SERVICE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CORE_DIR = os.path.join(SERVICE_DIR, "core")
+PROJECT_ROOT = os.path.abspath(os.path.join(SERVICE_DIR, "..", ".."))
+for p in (CORE_DIR, SERVICE_DIR, PROJECT_ROOT):
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 from stream_to_db import check_pipeline_watchdog, TimescaleDBClient
 
@@ -122,7 +126,7 @@ class TestWatchdogShellScript(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.script_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "../../deploy/linux/watchdog.sh")
+            os.path.join(PROJECT_ROOT, "deploy/linux/watchdog.sh")
         )
 
     def test_script_syntax_valid(self):

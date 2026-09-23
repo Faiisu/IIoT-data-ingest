@@ -20,14 +20,20 @@ import time
 import psycopg2
 import psycopg2.extras
 
-sys.path.insert(0, os.path.dirname(__file__))
+SERVICE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CORE_DIR = os.path.join(SERVICE_DIR, "core")
+PROJECT_ROOT = os.path.abspath(os.path.join(SERVICE_DIR, "..", ".."))
+for p in (CORE_DIR, SERVICE_DIR, PROJECT_ROOT):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
 from config_loader import load_daq_config
 from stream_to_db import ensure_db_and_tables, TimescaleDBClient
 
 class TestTimescaleDBPolicies(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.config_path = os.path.join(os.path.dirname(__file__), "config.json")
+        cls.config_path = os.path.join(SERVICE_DIR, "config.json")
         cls.cfg = load_daq_config(cls.config_path)
         cls.dsn = cls.cfg.DB_DSN
         try:
