@@ -278,14 +278,17 @@ class TestTimescaleDBPolicies(unittest.TestCase):
         # Refresh continuous aggregates over a 2-minute bounded window
         window_start = base_dt - timedelta(minutes=1)
         window_end = base_dt + timedelta(minutes=1)
-        cur.execute(
-            "CALL refresh_continuous_aggregate('daq_telemetry_1s', %s, %s);",
-            (window_start, window_end)
-        )
-        cur.execute(
-            "CALL refresh_continuous_aggregate('daq_telemetry_1m', %s, %s);",
-            (window_start, window_end)
-        )
+        for cagg in ('daq_telemetry_1s', 'daq_telemetry_1m'):
+            for attempt in range(5):
+                try:
+                    cur.execute(
+                        f"CALL refresh_continuous_aggregate('{cagg}', %s, %s);",
+                        (window_start, window_end)
+                    )
+                    break
+                except psycopg2.errors.LockNotAvailable:
+                    conn.rollback()
+                    time.sleep(0.5)
 
         # Verify daq_telemetry_1s contains aggregated rows for mockup device
         cur.execute(

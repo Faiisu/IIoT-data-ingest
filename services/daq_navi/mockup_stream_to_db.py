@@ -31,7 +31,8 @@ from stream_to_db import (
     TimescaleDBClient,
     MQTTClient,
     InfluxDBClient,
-    create_destination_client
+    create_destination_client,
+    check_pipeline_watchdog
 )
 
 config = load_daq_config()
@@ -72,6 +73,8 @@ stats = {
     "written":   0,   # total rows written to DB
     "dropped":   0,   # batches dropped due to full queue
     "db_errors": 0,   # number of DB insert failures
+    "last_polled_time": time.time(),
+    "last_written_time": time.time(),
 }
 
 _recent_rows_lock = threading.Lock()
@@ -131,6 +134,7 @@ def mock_daq_reader_thread():
                 with stats_lock:
                     stats["polled"] += returned_count
                     stats["enqueued"] += 1
+                    stats["last_polled_time"] = time.time()
             except queue.Full:
                 with stats_lock:
                     stats["dropped"] += 1
@@ -197,6 +201,7 @@ def db_writer_thread():
                 client.send_samples(rows, page_size=config.DB_PAGE_SIZE)
                 with stats_lock:
                     stats["written"] += len(rows)
+                    stats["last_written_time"] = time.time()
 
                 if csv_writer is not None:
                     for ts, dev, ch, val in rows:
@@ -243,19 +248,23 @@ def db_writer_thread():
 
 # ─── Monitor Thread ───────────────────────────────────────────────────────────
 def monitor_thread():
-    """Logs pipeline statistics and recent sample values with device_id."""
+    """Logs pipeline statistics, verifies health, and touches heartbeat file."""
     dest = getattr(config, 'DESTINATION', 'postgresql').lower()
+    watchdog_timeout = getattr(config, 'WATCHDOG_TIMEOUT_SEC', 30)
+    heartbeat_path = getattr(config, 'HEARTBEAT_FILE', '/tmp/daq_navi_heartbeat')
+
     while not stop_event.is_set():
         time.sleep(config.STATS_INTERVAL_SEC)
         with stats_lock:
             s = dict(stats)
+        q_len = data_queue.qsize()
         loss_pct = (s["dropped"] / s["enqueued"] * 100) if s["enqueued"] > 0 else 0.0
 
         log.info(
             f"[STATS] [{config.DEVICE_ID} -> {config.DB_TABLE}] "
             f"polled={s['polled']:,} | written={s['written']:,} | "
             f"dropped={s['dropped']} ({loss_pct:.1f}%) | "
-            f"errors={s['db_errors']} | queue={data_queue.qsize()}/{config.QUEUE_MAXSIZE}"
+            f"errors={s['db_errors']} | queue={q_len}/{config.QUEUE_MAXSIZE}"
         )
 
         with _recent_rows_lock:
@@ -264,6 +273,16 @@ def monitor_thread():
             log.info(f"[STATS] Sample rows [{dest.upper()}]:")
             for ts, dev, ch, val in snap:
                 log.info(f"  {ts.strftime('%H:%M:%S.%f')[:-3]} [{dev}] ch{ch} = {val:+.3f}")
+
+        is_healthy, warning = check_pipeline_watchdog(s, q_len, watchdog_timeout)
+        if not is_healthy:
+            log.warning(f"⚠ [WATCHDOG] {warning}")
+        else:
+            try:
+                with open(heartbeat_path, "w") as f:
+                    f.write(f"{time.time():.2f}\n")
+            except Exception as hb_err:
+                log.debug(f"Heartbeat write warning: {hb_err}")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

@@ -141,6 +141,8 @@ class DaqNaviConfig:
         # Operational
         self.STATS_INTERVAL_SEC = int(config_dict.get("STATS_INTERVAL_SEC", 10))
         self.ANCHOR_RECALIBRATE_INTERVAL_HR = float(config_dict.get("ANCHOR_RECALIBRATE_INTERVAL_HR", 24.0))
+        self.WATCHDOG_TIMEOUT_SEC = int(os.getenv("WATCHDOG_TIMEOUT_SEC", config_dict.get("WATCHDOG_TIMEOUT_SEC", 30)))
+        self.HEARTBEAT_FILE = os.getenv("HEARTBEAT_FILE", config_dict.get("HEARTBEAT_FILE", "/tmp/daq_navi_heartbeat"))
 
 def load_daq_config(config_path: str = None) -> DaqNaviConfig:
     if config_path is None:

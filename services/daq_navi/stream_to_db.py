@@ -79,6 +79,7 @@ log = logging.getLogger(__name__)
 #       sample_ts = anchor_time_ns + (samples_since_anchor + s) * dt_ns
 data_queue = queue.Queue(maxsize=config.QUEUE_MAXSIZE)
 stop_event = threading.Event()
+daq_error_occurred = threading.Event()
 
 stats_lock = threading.Lock()
 stats = {
@@ -87,6 +88,8 @@ stats = {
     "written":  0,   # total rows written to DB
     "dropped":  0,   # batches dropped due to full queue
     "db_errors": 0,  # number of DB insert failures
+    "last_polled_time": time.time(),
+    "last_written_time": time.time(),
 }
 
 
@@ -98,6 +101,7 @@ def daq_reader_thread():
     try:
         if WaveformAiCtrl is None:
             log.error("Advantech BDaq library is not available in this environment.")
+            daq_error_occurred.set()
             stop_event.set()
             return
 
@@ -126,12 +130,14 @@ def daq_reader_thread():
         ret = wf.prepare()
         if BioFailed(ret):
             log.error(f"DAQ prepare() failed on {config.DEVICE_DESCRIPTION} — check device connection and permissions")
+            daq_error_occurred.set()
             stop_event.set()
             return
 
         ret = wf.start()
         if BioFailed(ret):
             log.error(f"DAQ start() failed on {config.DEVICE_DESCRIPTION}")
+            daq_error_occurred.set()
             stop_event.set()
             return
 
@@ -173,6 +179,7 @@ def daq_reader_thread():
                     with stats_lock:
                         stats["polled"]   += returned_count
                         stats["enqueued"] += 1
+                        stats["last_polled_time"] = time.time()
                 except queue.Full:
                     with stats_lock:
                         stats["dropped"] += 1
@@ -194,6 +201,7 @@ def daq_reader_thread():
             log.info("DAQ thread stopped and device released.")
     except Exception as e:
         log.exception(f"Unhandled exception in DAQ Reader thread: {e}")
+        daq_error_occurred.set()
         stop_event.set()
 
 
@@ -458,7 +466,11 @@ class TimescaleDBClient:
         while not self.stop_event.is_set():
             try:
                 ensure_db_and_tables(self.dsn, self.table_name, self.retention_days, self.compression_interval)
-                self.conn = psycopg2.connect(self.dsn)
+                self.conn = psycopg2.connect(
+                    self.dsn,
+                    connect_timeout=10,
+                    options="-c statement_timeout=15000"
+                )
                 self.conn.autocommit = False
                 self.cur = self.conn.cursor()
                 db_desc = f" '{self.dbname}'" if self.dbname else ""
@@ -486,7 +498,11 @@ class TimescaleDBClient:
             log.warning(f"Database insert failed ({e}). Auto-creating database/tables and retrying...")
             if ensure_db_and_tables(self.dsn, self.table_name):
                 try:
-                    self.conn = psycopg2.connect(self.dsn)
+                    self.conn = psycopg2.connect(
+                        self.dsn,
+                        connect_timeout=10,
+                        options="-c statement_timeout=15000"
+                    )
                     self.conn.autocommit = False
                     self.cur = self.conn.cursor()
                     psycopg2.extras.execute_values(
@@ -842,6 +858,7 @@ def db_writer_thread():
             client.send_samples(rows, page_size=config.DB_PAGE_SIZE)
             with stats_lock:
                 stats["written"] += len(rows)
+                stats["last_written_time"] = time.time()
         except Exception as e:
             with stats_lock:
                 stats["db_errors"] += 1
@@ -876,19 +893,56 @@ def db_writer_thread():
 
 
 
-# ─── Monitor Thread ───────────────────────────────────────────────────────────
+# ─── Watchdog & Monitoring ───────────────────────────────────────────────────
+def check_pipeline_watchdog(stats_snapshot, qsize, timeout_sec, current_time=None):
+    """
+    Checks if DAQ acquisition or DB writing is stalled.
+    Returns (status: bool, warning_msg: str | None).
+    """
+    now = time.time() if current_time is None else current_time
+    last_polled = stats_snapshot.get("last_polled_time", now)
+    last_written = stats_snapshot.get("last_written_time", now)
+
+    warnings = []
+    # If DAQ has not polled within timeout_sec
+    if (now - last_polled) > timeout_sec:
+        warnings.append(f"DAQ acquisition stalled: no samples polled in {now - last_polled:.1f}s (threshold: {timeout_sec}s)")
+
+    # If queue has pending items but writer hasn't written within timeout_sec
+    if qsize > 0 and (now - last_written) > timeout_sec:
+        warnings.append(f"Writer stalled: {qsize} batches queued but no samples written in {now - last_written:.1f}s (threshold: {timeout_sec}s)")
+
+    if warnings:
+        return False, " | ".join(warnings)
+    return True, None
+
+
 def monitor_thread():
-    """Logs pipeline statistics every STATS_INTERVAL_SEC seconds."""
+    """Logs pipeline statistics, verifies health, and touches heartbeat file."""
+    watchdog_timeout = getattr(config, 'WATCHDOG_TIMEOUT_SEC', 30)
+    heartbeat_path = getattr(config, 'HEARTBEAT_FILE', '/tmp/daq_navi_heartbeat')
+
     while not stop_event.is_set():
         time.sleep(config.STATS_INTERVAL_SEC)
         with stats_lock:
             s = dict(stats)
+        q_len = data_queue.qsize()
         loss_pct = (s["dropped"] / s["enqueued"] * 100) if s["enqueued"] > 0 else 0.0
         log.info(
             f"[STATS] polled={s['polled']:,} | written={s['written']:,} | "
             f"dropped_batches={s['dropped']} ({loss_pct:.1f}%) | "
-            f"db_errors={s['db_errors']} | queue={data_queue.qsize()}/{config.QUEUE_MAXSIZE}"
+            f"db_errors={s['db_errors']} | queue={q_len}/{config.QUEUE_MAXSIZE}"
         )
+
+        is_healthy, warning = check_pipeline_watchdog(s, q_len, watchdog_timeout)
+        if not is_healthy:
+            log.warning(f"⚠ [WATCHDOG] {warning}")
+        else:
+            try:
+                with open(heartbeat_path, "w") as f:
+                    f.write(f"{time.time():.2f}\n")
+            except Exception as hb_err:
+                log.debug(f"Heartbeat write warning: {hb_err}")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -950,6 +1004,10 @@ def main():
     log.info(f"  Dropped        : {s['dropped']} batches")
     log.info(f"  Errors         : {s['db_errors']}")
     log.info("=" * 60)
+
+    if daq_error_occurred.is_set():
+        log.error("Pipeline stopped due to DAQ hardware error.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -18,13 +18,29 @@ if [ -z "$MOCKUP" ] && [ -f "config.json" ]; then
     MOCKUP=$($PY -c "import json; print(json.load(open('config.json')).get('MOCKUP_MODE', 'false'))" 2>/dev/null || echo "false")
 fi
 
+# If hardware mode is requested but driver library is missing, fallback to mockup with warning
 case "$MOCKUP" in
     [Tt][Rr][Uu][Ee]|1)
         echo "[DAQ-Navi Entrypoint] Launching synthetic mockup pipeline (mockup_stream_to_db.py)..."
         exec $PY mockup_stream_to_db.py "$@"
         ;;
     *)
-        echo "[DAQ-Navi Entrypoint] Launching hardware DAQ streaming pipeline (stream_to_db.py)..."
-        exec $PY stream_to_db.py "$@"
+        if [ ! -f "/usr/lib/libbiodaq.so" ] && [ ! -f "/opt/advantech/libs/libbiodaq.so" ] && [ ! -f "/usr/local/lib/libbiodaq.so" ]; then
+            echo "[DAQ-Navi Entrypoint] WARNING: Advantech driver library (libbiodaq.so) not found in container paths."
+            echo "[DAQ-Navi Entrypoint] Falling back to synthetic mockup mode (mockup_stream_to_db.py)..."
+            exec $PY mockup_stream_to_db.py "$@"
+        else
+            echo "[DAQ-Navi Entrypoint] Launching hardware DAQ streaming pipeline (stream_to_db.py)..."
+            if ! $PY stream_to_db.py "$@"; then
+                EXIT_CODE=$?
+                echo "[DAQ-Navi Entrypoint] Hardware streaming pipeline exited with code $EXIT_CODE."
+                if [ "${AUTO_FALLBACK:-true}" = "true" ]; then
+                    echo "[DAQ-Navi Entrypoint] AUTO_FALLBACK is enabled. Falling back to synthetic mockup pipeline (mockup_stream_to_db.py)..."
+                    exec $PY mockup_stream_to_db.py "$@"
+                else
+                    exit $EXIT_CODE
+                fi
+            fi
+        fi
         ;;
 esac
