@@ -1,205 +1,190 @@
-# MDDP Ingestion Control Suite — Linux Shell & Systemd Deployment Guide
+# MDDP Ingestion Control Suite — Linux Deployment Guide
 
-This document provides step-by-step instructions for deploying the MDDP Ingestion Control Suite on **Linux (Ubuntu/Debian)** using native shell scripts (`deploy/linux/install_deps.sh`, `run.sh`, `stop.sh`), with support for physical **Advantech USB-4716 DAQ** hardware, serial devices, **systemd 24/7 autostart**, and **ingestion state persistence across reboots**.
+All services run as Docker containers. The `docker-compose.override.yml` file enables **dev mode** (hot-reload via volume mount) automatically when you run `docker compose up`. For production (baked image, no mount), pass `-f docker-compose.yml` explicitly.
 
 ---
 
-## Quick Start: Interactive Production Setup Wizard
-
-For an automated, guided setup on a fresh Linux server with Advantech PCI/USB DAQ cards and Docker, run:
+## Quick Start
 
 ```bash
-# Non-interactive prerequisite inspection:
-./scripts/setup_wizard.sh --check-only
+# Clone repository
+git clone <repository-url>
+cd IIoT-data-ingest
 
-# Interactive guided setup:
-./scripts/setup_wizard.sh
+# Copy and edit environment file
+cp .env.example .env
+
+# Start full stack (dev mode — auto-reload enabled)
+docker compose up -d
+
+# Verify health
+docker compose ps
+curl http://localhost:8081/api/status
 ```
-
-The wizard validates kernel compatibility, scans for PCI-1716 hardware, checks/guides DAQNavi driver installation, provisions Docker and Docker Compose, configures `.env` and `config.json`, and launches the containerized stack with health verification.
 
 ---
 
 ## Table of Contents
 
-1. [Interactive Setup Wizard (Recommended)](#quick-start-interactive-production-setup-wizard)
-2. [Prerequisites](#1-prerequisites)
-2. [Database & Broker Setup](#2-database--broker-setup)
-3. [Project Setup & Dependencies](#3-project-setup--dependencies)
+1. [Prerequisites](#1-prerequisites)
+2. [Configuration](#2-configuration)
+3. [Dev Mode vs Production Mode](#3-dev-mode-vs-production-mode)
 4. [Service Startup & Management](#4-service-startup--management)
-5. [24/7 Linux Boot Autostart (Systemd)](#5-247-linux-boot-autostart-systemd)
-6. [Ingestion State Persistence Across Reboots](#6-ingestion-state-persistence-across-reboots)
-7. [Hardware Layer Connectivity (USB & Serial)](#7-hardware-layer-connectivity-usb--serial)
-8. [Service Access & Verification](#8-service-access--verification)
-9. [Viewing Logs & Diagnostics](#9-viewing-logs--diagnostics)
-10. [Stopping Services](#10-stopping-services)
+5. [24/7 Autostart (Systemd)](#5-247-autostart-systemd)
+6. [Hardware (Advantech PCI/USB DAQ)](#6-hardware-advantech-pciusb-daq)
+7. [Service Access & Ports](#7-service-access--ports)
+8. [Viewing Logs & Diagnostics](#8-viewing-logs--diagnostics)
+9. [Stopping Services](#9-stopping-services)
 
 ---
 
 ## 1. Prerequisites
 
-Before starting deployment on Linux, ensure the following are installed:
+- **Docker Engine** ≥ 24 and **Docker Compose** plugin
+- **Git**
+- (Real hardware) Advantech DAQNavi SDK driver installed on the host
 
-- **Python** (v3.9 or higher)
-- **uv** (Recommended package manager) or standard `python3-venv` + `pip`
-- **Git** (to clone repository)
-- **Advantech DAQNavi SDK for Linux** (for real USB-4716 hardware mode)
-
-Verify Python / uv installation:
+Install Docker:
 ```bash
-python3 --version
-uv --version  # optional but recommended
+./deploy/linux/install_deps.sh
 ```
 
 ---
 
-## 2. Database & Broker Setup
+## 2. Configuration
 
-The suite requires access to a **TimescaleDB / PostgreSQL** instance and optionally an **MQTT Broker** (e.g. Mosquitto):
+Copy the environment template and edit credentials:
+```bash
+cp .env.example .env
+```
 
-1. **TimescaleDB**: Install native `postgresql` + `timescaledb` extension or connect to a remote PostgreSQL server.
-2. **Mosquitto MQTT**: Install via `sudo apt install mosquitto mosquitto-clients` (if using MQTT destination mode).
-
-Ensure database and tables are created (see `db_setup.sql` or configuration guide).
+Edit `services/daq_navi/config.json` to match your hardware/DB settings:
+```json
+{
+  "DEVICE_DESCRIPTION": "PCI-1716,BID#0",
+  "DESTINATION": "postgresql",
+  "CLOCK_RATE": 2000,
+  "CHANNEL_COUNT": 4
+}
+```
 
 ---
 
-## 3. Project Setup & Dependencies
+## 3. Dev Mode vs Production Mode
 
-1. Clone or copy the project repository to your target directory:
-   ```bash
-   cd ~/DAQ-USB-4716
-   ```
+| | **Dev mode** (default) | **Production mode** |
+|---|---|---|
+| Command | `docker compose up -d` | `docker compose -f docker-compose.yml up -d` |
+| Source code | Volume-mounted from host — edit & reload in place | Baked into image at build time |
+| Flask debug | ✅ Auto-reload on file save | ❌ Off |
+| Rebuild needed? | ❌ No | ✅ Yes (`docker compose build`) |
+| When to use | Active development | Stable release / production server |
 
-2. Install project dependencies:
-   ```bash
-   ./deploy/linux/install_deps.sh
-   ```
-
-This will automatically create a virtual environment (`.venv`) and install all required dependencies.
+**Dev mode** is activated automatically by `docker-compose.override.yml`. This file mounts `./services/daq_navi` into the container and sets `FLASK_DEBUG=1`, so Werkzeug restarts the server whenever you save a Python file.
 
 ---
 
 ## 4. Service Startup & Management
 
-Launch the MDDP application suite in background mode:
+```bash
+# Start all services (dev mode)
+docker compose up -d
+
+# Rebuild image after Dockerfile or requirements.txt changes, then start
+docker compose build daq-navi && docker compose up -d --force-recreate daq-navi
+
+# Restart a single service
+docker compose restart daq-navi
+
+# View live status
+docker compose ps
+```
+
+---
+
+## 5. 24/7 Autostart (Systemd)
+
+To launch the Docker stack automatically on boot, use the provided systemd unit:
 
 ```bash
-./deploy/linux/run.sh
+# One-time setup (requires sudo)
+sudo ./deploy/linux/setup_systemd_docker.sh
+
+# Manage via systemctl
+sudo systemctl status mddp
+sudo systemctl start mddp
+sudo systemctl stop mddp
+sudo systemctl restart mddp
 ```
 
-**Expected Output:**
-```
-==========================================================
-         MDDP Ingestion Control Suite Startup
-==========================================================
-[SYSTEM] Using Python interpreter: .venv/bin/python
-[SYSTEM] Starting Ingestion Portal on Port 8080 (all interfaces)...
-[SYSTEM] Starting DAQ Control Panel on Port 8081 (all interfaces)...
-[SYSTEM] Starting Musashi II Control Panel on Port 8082 (all interfaces)...
-[SYSTEM] Starting Musashi IV Control Panel on Port 8083 (all interfaces)...
-[SYSTEM] Starting Database Plotter on Port 8084 (all interfaces)...
-[SYSTEM] Services launched in background.
-[SYSTEM] Accessible locally at http://localhost:8080
-[SYSTEM] Accessible network-wide at http://<HOST_IP>:8080
-==========================================================
-```
+Docker's own `restart: unless-stopped` policy also handles individual container crash recovery automatically.
 
 ---
 
-## 5. 24/7 Linux Boot Autostart (Systemd)
+## 6. Hardware (Advantech PCI/USB DAQ)
 
-To ensure MDDP services automatically launch when the Linux system boots up or reboots:
+Set `MOCKUP_MODE=false` in `.env` for real hardware. The container already has the necessary device mounts:
 
-1. Run the systemd setup script (requires `sudo` privileges):
-   ```bash
-   ./deploy/linux/setup_systemd.sh
-   ```
+```yaml
+# docker-compose.yml (already configured)
+privileged: true
+volumes:
+  - /dev:/dev
+  - /usr/lib:/usr/lib:ro
+  - /opt/advantech:/opt/advantech:ro
+  - /etc/biobdaq:/etc/biobdaq:ro
+```
 
-2. Manage the service via standard `systemctl` commands:
-   ```bash
-   # Check service status
-   sudo systemctl status mddp
-
-   # Start service manually
-   sudo systemctl start mddp
-
-   # Stop service manually
-   sudo systemctl stop mddp
-
-   # Restart service
-   sudo systemctl restart mddp
-   ```
-
----
-
-## 6. Ingestion State Persistence Across Reboots
-
-The MDDP suite features **automatic ingestion state recovery**:
-
-- When DAQ or Musashi IV stream ingestion is started via the Web UI (in either `REAL` or `MOCKUP` mode), the desired state is written to a persistent file.
-- When the Linux machine restarts (or power-cycles), the systemd service starts `deploy/linux/run.sh` and boots up the Web GUIs.
-- The Web GUIs check the persistent state and **automatically resume telemetry ingestion** in the exact same mode (`REAL` or `MOCKUP`) as before the reboot!
-
-If ingestion was stopped by the user prior to reboot, it remains in the idle/ready state after boot.
-
----
-
-## 7. Hardware Layer Connectivity (USB & Serial)
-
-The shell-based deployment supports both **Mockup Mode** (driverless simulation) and **Real Hardware Mode**:
-
-### A. Mockup Mode (Software Simulation)
-No physical hardware or driver configuration is required. Select Mockup mode from the web UI ([http://localhost:8081](http://localhost:8081)).
-
-### B. Real USB Hardware Mode (Advantech USB-4716 DAQ)
-Ensure Advantech DAQNavi drivers (`libbiodaq.so`) are installed on your Linux system (`/usr/lib` or `/usr/local/lib`) and user has permissions for `/dev/bdaq*` or USB devices:
+Ensure the host user can access DAQ devices:
 ```bash
 sudo usermod -aG dialout,plugdev $USER
 ```
 
-### C. Real Serial Port Mode (Musashi IV RS-232 Controller)
-Ensure serial device permissions (`/dev/ttyUSB0` or `/dev/ttyACM0`):
+For guided production setup on a fresh server (kernel check, driver install, Docker install):
 ```bash
-sudo chmod 666 /dev/ttyUSB0
+./deploy/linux/setup_wizard.sh
 ```
 
 ---
 
-## 8. Service Access & Verification
-
-Once launched, access the web microservices via your browser:
+## 7. Service Access & Ports
 
 | Service | Port | URL |
-| :--- | :--- | :--- |
-| **Portal Gateway** | `8080` | [http://localhost:8080](http://localhost:8080) |
-| **DAQ USB-4716 Panel** | `8081` | [http://localhost:8081](http://localhost:8081) |
-| **Musashi II Panel** | `8082` | [http://localhost:8082](http://localhost:8082) |
-| **Musashi IV Panel** | `8083` | [http://localhost:8083](http://localhost:8083) |
-| **Database Plotter** | `8084` | [http://localhost:8084](http://localhost:8084) |
+|:---|:---|:---|
+| **Portal Gateway** | `8080` | http://localhost:8080 |
+| **DAQ Control Panel** | `8081` | http://localhost:8081 |
+| **Musashi II Panel** | `8082` | http://localhost:8082 *(bare-metal)* |
+| **Musashi IV Panel** | `8083` | http://localhost:8083 *(bare-metal)* |
+| **Database Plotter** | `8084` | http://localhost:8084 |
+| **TimescaleDB** | `5432` | postgresql://... |
+| **MQTT Broker** | `1883` | mqtt://... |
+| **InfluxDB** | `8086` | http://localhost:8086 |
 
-Verify active listening ports:
-```bash
-lsof -i :8080 -i :8081 -i :8082 -i :8083 -i :8084
-```
+> **Note**: Musashi II/IV are bare-metal services (not Dockerized).
 
 ---
 
-## 9. Viewing Logs & Diagnostics
+## 8. Viewing Logs & Diagnostics
 
-Service processes write background logs or output to stdout/stderr. To monitor individual process log files:
 ```bash
-tail -f services/daq_navi/daq_pipeline.log
-# Or if running via Docker:
+# Follow DAQ panel logs
 docker compose logs -f daq-navi
+
+# Follow all services
+docker compose logs -f
+
+# One-shot watchdog health check
+./deploy/linux/watchdog.sh --oneshot
 ```
 
 ---
 
-## 10. Stopping Services
-
-To safely terminate all running background services:
+## 9. Stopping Services
 
 ```bash
-./deploy/linux/stop.sh
+# Stop all containers (data volumes preserved)
+docker compose down
+
+# Stop + remove volumes (full reset — deletes DB data)
+docker compose down -v
 ```

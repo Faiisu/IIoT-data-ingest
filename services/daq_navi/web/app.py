@@ -569,5 +569,7 @@ signal.signal(signal.SIGTERM, handle_shutdown)
 
 if __name__ == '__main__':
     init_application()
+    # Enable Werkzeug auto-reload in dev mode when FLASK_DEBUG=1 is set (docker-compose.override.yml)
+    _debug = os.getenv("FLASK_DEBUG", "0").strip() == "1"
     # Served on Port 8081
-    socketio.run(app, host='0.0.0.0', port=8081, debug=False)
+    socketio.run(app, host='0.0.0.0', port=8081, debug=_debug, use_reloader=_debug, reloader_type='stat')
