@@ -91,35 +91,49 @@ stats = {
 def daq_reader_thread():
     """
     Responsibility: poll hardware as fast as possible, enqueue raw data.
-    Does NO parsing — just copies the returned list and enqueues immediately.
     """
     try:
+        if WaveformAiCtrl is None:
+            log.error("Advantech BDaq library is not available in this environment.")
+            stop_event.set()
+            return
+
         wf = WaveformAiCtrl(config.DEVICE_DESCRIPTION)
-        wf.loadProfile         = config.PROFILE_PATH
+        if config.PROFILE_PATH and os.path.exists(config.PROFILE_PATH):
+            wf.loadProfile = config.PROFILE_PATH
+
         wf.conversion.channelStart = config.START_CHANNEL
         wf.conversion.channelCount = config.CHANNEL_COUNT
         wf.conversion.clockRate    = config.CLOCK_RATE
         wf.record.sectionCount     = config.SECTION_COUNT
         wf.record.sectionLength    = config.SECTION_LENGTH
 
+        log.info(f"[DAQ] Configuring {config.CHANNEL_COUNT} channels on {config.DEVICE_DESCRIPTION} ({config.DEVICE_ID}):")
         for i in range(config.CHANNEL_COUNT):
-            wf.channels[config.START_CHANNEL + i].signalType = AiSignalType.SingleEnded
-            wf.channels[config.START_CHANNEL + i].valueRange = ValueRange.V_0To5
+            ch_idx = config.START_CHANNEL + i
+            ch_cfg = config.channels.get(ch_idx)
+            if ch_cfg:
+                wf.channels[ch_idx].signalType = ch_cfg.signal_type
+                wf.channels[ch_idx].valueRange = ch_cfg.value_range
+                log.info(f"  ch{ch_idx} ({ch_cfg.label}): signalType={ch_cfg.signal_type_str}, range={ch_cfg.value_range_str}")
+            else:
+                wf.channels[ch_idx].signalType = getattr(AiSignalType, "SingleEnded", 0)
+                wf.channels[ch_idx].valueRange = getattr(ValueRange, "V_0To5", 0)
 
         ret = wf.prepare()
         if BioFailed(ret):
-            log.error("DAQ prepare() failed — check device connection and profile.xml")
+            log.error(f"DAQ prepare() failed on {config.DEVICE_DESCRIPTION} — check device connection and permissions")
             stop_event.set()
             return
 
         ret = wf.start()
         if BioFailed(ret):
-            log.error("DAQ start() failed")
+            log.error(f"DAQ start() failed on {config.DEVICE_DESCRIPTION}")
             stop_event.set()
             return
 
         log.info(
-            f"DAQ started | device={config.DEVICE_DESCRIPTION} | "
+            f"DAQ started | device={config.DEVICE_DESCRIPTION} (ID: {config.DEVICE_ID}) | "
             f"channels={config.CHANNEL_COUNT} | clock={config.CLOCK_RATE} Hz | "
             f"sectionLength={config.SECTION_LENGTH} | userBuffer={config.USER_BUFFER_SIZE}"
         )
