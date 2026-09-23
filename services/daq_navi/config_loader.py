@@ -110,6 +110,8 @@ class DaqNaviConfig:
         self.DB_DSN = config_dict.get("DB_DSN", "postgresql://admin:admin@localhost:5432/daq_db")
         self.DB_PAGE_SIZE = int(config_dict.get("DB_PAGE_SIZE", 8000))
         self.DB_INSERT_METHOD = config_dict.get("DB_INSERT_METHOD", "execute_values")
+        self.DB_RETENTION_DAYS = int(config_dict.get("DB_RETENTION_DAYS", 90))
+        self.DB_COMPRESSION_INTERVAL = str(config_dict.get("DB_COMPRESSION_INTERVAL", "1 hour"))
         
         # InfluxDB
         self.INFLUX_URL = config_dict.get("INFLUX_URL", "http://localhost:8086")

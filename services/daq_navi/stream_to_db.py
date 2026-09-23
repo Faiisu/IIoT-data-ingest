@@ -280,10 +280,36 @@ class DaqSampleParser:
         return rows
 
 
-def ensure_db_and_tables(dsn, table_name="daq_telemetry"):
+def _create_cagg_with_policy(cur, table_name: str, bucket_size: str, suffix: str, start_offset: str, end_offset: str, schedule_interval: str):
+    cagg_name = f"{table_name}_{suffix}"
+    cur.execute(f"""
+        CREATE MATERIALIZED VIEW IF NOT EXISTS {cagg_name}
+        WITH (timescaledb.continuous) AS
+        SELECT
+            time_bucket('{bucket_size}', time) AS bucket,
+            device_id,
+            channel,
+            AVG(value) AS avg,
+            MIN(value) AS min,
+            MAX(value) AS max,
+            COUNT(value) AS count
+        FROM {table_name}
+        GROUP BY bucket, device_id, channel
+        WITH NO DATA;
+    """)
+    cur.execute(f"""
+        SELECT add_continuous_aggregate_policy('{cagg_name}',
+            start_offset => INTERVAL '{start_offset}',
+            end_offset => INTERVAL '{end_offset}',
+            schedule_interval => INTERVAL '{schedule_interval}',
+            if_not_exists => TRUE);
+    """)
+
+
+def ensure_db_and_tables(dsn, table_name="daq_telemetry", retention_days=None, compression_interval=None):
     """
-    Auto-creates database if missing and auto-creates required tables/hypertable/indexes if missing.
-    Supports configurable table_name with device_id column.
+    Auto-creates database if missing and auto-creates required tables/hypertable/indexes/policies if missing.
+    Supports configurable table_name with device_id column, configurable retention_days, and compression_interval.
     """
     try:
         import psycopg2.extensions
@@ -311,10 +337,16 @@ def ensure_db_and_tables(dsn, table_name="daq_telemetry"):
         target_conn = psycopg2.connect(dsn, connect_timeout=5)
         target_conn.autocommit = True
         with target_conn.cursor() as cur:
+            has_timescale = False
             try:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS timescaledb;")
+                has_timescale = True
             except Exception:
-                pass
+                try:
+                    cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'timescaledb';")
+                    has_timescale = bool(cur.fetchone())
+                except Exception:
+                    has_timescale = False
 
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS {table_name} (
@@ -325,15 +357,65 @@ def ensure_db_and_tables(dsn, table_name="daq_telemetry"):
                 );
             """)
 
-            try:
-                cur.execute(f"SELECT create_hypertable('{table_name}', 'time', chunk_time_interval => INTERVAL '1 hour', if_not_exists => TRUE);")
-            except Exception:
-                pass
+            if has_timescale:
+                try:
+                    cur.execute(f"SELECT create_hypertable('{table_name}', 'time', chunk_time_interval => INTERVAL '1 hour', if_not_exists => TRUE);")
+                except Exception:
+                    pass
 
             cur.execute(f"""
                 CREATE INDEX IF NOT EXISTS idx_{table_name}_device_channel_time
                     ON {table_name} (device_id, channel, time DESC);
             """)
+
+            if has_timescale:
+                # Compression Policy
+                try:
+                    resolved_compression_interval = str(compression_interval) if compression_interval is not None else getattr(config, "DB_COMPRESSION_INTERVAL", "1 hour")
+                    cur.execute(f"""
+                        ALTER TABLE {table_name} SET (
+                            timescaledb.compress,
+                            timescaledb.compress_segmentby = 'device_id, channel',
+                            timescaledb.compress_orderby = 'time DESC'
+                        );
+                    """)
+                    cur.execute(f"SELECT add_compression_policy('{table_name}', INTERVAL '{resolved_compression_interval}', if_not_exists => TRUE);")
+                except Exception as comp_err:
+                    log.warning(f"[DBSetup] Compression policy setup warning: {comp_err}")
+
+                # Retention Policy
+                try:
+                    resolved_retention_days = int(retention_days) if retention_days is not None else getattr(config, "DB_RETENTION_DAYS", 90)
+                    cur.execute(f"SELECT add_retention_policy('{table_name}', INTERVAL '{resolved_retention_days} days', if_not_exists => TRUE);")
+                except Exception as ret_err:
+                    log.warning(f"[DBSetup] Retention policy setup warning: {ret_err}")
+
+                # Continuous Aggregates: 1s and 1m downsampling
+                try:
+                    _create_cagg_with_policy(
+                        cur=cur,
+                        table_name=table_name,
+                        bucket_size="1 second",
+                        suffix="1s",
+                        start_offset="1 hour",
+                        end_offset="1 second",
+                        schedule_interval="10 seconds"
+                    )
+                except Exception as cagg_err:
+                    log.warning(f"[DBSetup] Continuous aggregate {table_name}_1s warning: {cagg_err}")
+
+                try:
+                    _create_cagg_with_policy(
+                        cur=cur,
+                        table_name=table_name,
+                        bucket_size="1 minute",
+                        suffix="1m",
+                        start_offset="1 day",
+                        end_offset="1 minute",
+                        schedule_interval="1 minute"
+                    )
+                except Exception as cagg_err:
+                    log.warning(f"[DBSetup] Continuous aggregate {table_name}_1m warning: {cagg_err}")
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS daq_sessions (
@@ -359,18 +441,20 @@ class TimescaleDBClient:
     """
     Responsibility: Manage TimescaleDB connection lifecycle, transactions, and execution.
     """
-    def __init__(self, dsn, stop_event, dbname=None, table_name="daq_telemetry"):
+    def __init__(self, dsn, stop_event, dbname=None, table_name="daq_telemetry", retention_days=None, compression_interval=None):
         self.dsn = dsn
         self.stop_event = stop_event
         self.dbname = dbname
         self.table_name = table_name
+        self.retention_days = retention_days if retention_days is not None else getattr(config, "DB_RETENTION_DAYS", 90)
+        self.compression_interval = compression_interval if compression_interval is not None else getattr(config, "DB_COMPRESSION_INTERVAL", "1 hour")
         self.conn = None
         self.cur = None
 
     def connect(self):
         while not self.stop_event.is_set():
             try:
-                ensure_db_and_tables(self.dsn, self.table_name)
+                ensure_db_and_tables(self.dsn, self.table_name, self.retention_days, self.compression_interval)
                 self.conn = psycopg2.connect(self.dsn)
                 self.conn.autocommit = False
                 self.cur = self.conn.cursor()
@@ -648,7 +732,13 @@ def db_writer_thread():
             stop_event=stop_event
         )
     else:
-        client = TimescaleDBClient(config.DB_DSN, stop_event, table_name=config.DB_TABLE)
+        client = TimescaleDBClient(
+            config.DB_DSN,
+            stop_event,
+            table_name=config.DB_TABLE,
+            retention_days=config.DB_RETENTION_DAYS,
+            compression_interval=getattr(config, 'DB_COMPRESSION_INTERVAL', '1 hour')
+        )
 
     if not client.connect():
         log.info(f"Writer thread exiting ({destination} connection failed).")

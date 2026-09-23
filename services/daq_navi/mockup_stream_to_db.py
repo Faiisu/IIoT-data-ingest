@@ -193,7 +193,9 @@ def db_writer_thread():
             dsn=config.DB_DSN,
             stop_event=stop_event,
             dbname=config.DB_NAME,
-            table_name=config.DB_TABLE
+            table_name=config.DB_TABLE,
+            retention_days=getattr(config, 'DB_RETENTION_DAYS', 90),
+            compression_interval=getattr(config, 'DB_COMPRESSION_INTERVAL', '1 hour')
         )
 
     if not client.connect():
@@ -326,7 +328,12 @@ def main():
     # Auto-bootstrap DB table if using PostgreSQL/TimescaleDB
     if dest in ('database', 'postgresql'):
         try:
-            ensure_db_and_tables(config.DB_DSN, config.DB_TABLE)
+            ensure_db_and_tables(
+                config.DB_DSN,
+                config.DB_TABLE,
+                retention_days=getattr(config, 'DB_RETENTION_DAYS', 90),
+                compression_interval=getattr(config, 'DB_COMPRESSION_INTERVAL', '1 hour')
+            )
         except Exception as e:
             log.warning(f"Initial DB check warning ({e}) — writer will retry on connect.")
 

@@ -25,6 +25,8 @@ class TestConfigAndSchema(unittest.TestCase):
         self.assertEqual(cfg.CLOCK_RATE, 2000)
         self.assertEqual(cfg.DB_TABLE, "daq_telemetry")
         self.assertEqual(cfg.DESTINATION, "postgresql")
+        self.assertEqual(cfg.DB_RETENTION_DAYS, 90)
+        self.assertEqual(cfg.DB_COMPRESSION_INTERVAL, "1 hour")
         
         # Verify 4 channels are parsed
         self.assertIn(0, cfg.channels)
@@ -51,6 +53,13 @@ class TestConfigAndSchema(unittest.TestCase):
         self.assertIn("device_id", content)
         self.assertIn("create_hypertable", content)
         self.assertIn("idx_daq_telemetry_device_channel_time", content)
+        self.assertIn("timescaledb.compress", content)
+        self.assertIn("compress_segmentby", content)
+        self.assertIn("add_compression_policy", content)
+        self.assertIn("add_retention_policy", content)
+        self.assertIn("daq_telemetry_1s", content)
+        self.assertIn("daq_telemetry_1m", content)
+        self.assertIn("add_continuous_aggregate_policy", content)
 
     @patch("psycopg2.connect")
     def test_ensure_db_and_tables_execution(self, mock_connect):
@@ -62,13 +71,20 @@ class TestConfigAndSchema(unittest.TestCase):
         mock_cur.fetchone.return_value = (1,)  # DB exists
         mock_connect.return_value = mock_conn
         
-        success = ensure_db_and_tables("postgresql://user:pass@localhost:5432/test_db", "test_telemetry")
+        success = ensure_db_and_tables("postgresql://user:pass@localhost:5432/test_db", "test_telemetry", retention_days=60)
         self.assertTrue(success)
         
         # Verify execute calls contained create table and index
         executed_sqls = [call[0][0] for call in mock_cur.execute.call_args_list]
         self.assertTrue(any("CREATE TABLE IF NOT EXISTS test_telemetry" in sql for sql in executed_sqls))
         self.assertTrue(any("idx_test_telemetry_device_channel_time" in sql for sql in executed_sqls))
+        self.assertTrue(any("timescaledb.compress" in sql for sql in executed_sqls))
+        self.assertTrue(any("add_compression_policy" in sql for sql in executed_sqls))
+        self.assertTrue(any("add_retention_policy" in sql for sql in executed_sqls))
+        self.assertTrue(any("60 days" in sql for sql in executed_sqls))
+        self.assertTrue(any("test_telemetry_1s" in sql for sql in executed_sqls))
+        self.assertTrue(any("test_telemetry_1m" in sql for sql in executed_sqls))
+        self.assertTrue(any("add_continuous_aggregate_policy" in sql for sql in executed_sqls))
 
 if __name__ == "__main__":
     unittest.main()
