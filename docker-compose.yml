@@ -4,14 +4,104 @@ services:
     container_name: daq_timescaledb
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "${DB_PORT:-5432}:5432"
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: admin
-      POSTGRES_DB: daq_db
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin}
+      POSTGRES_DB: ${POSTGRES_DB:-daq_db}
     volumes:
       - tsdb_data:/var/lib/postgresql/data
       - ./scripts/sql/db_setup.sql:/docker-entrypoint-initdb.d/01-db-setup.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-daq_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mqtt-broker:
+    image: eclipse-mosquitto:2
+    container_name: daq_mosquitto
+    restart: unless-stopped
+    ports:
+      - "${MQTT_PORT:-1883}:1883"
+    volumes:
+      - ./config/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+
+  influxdb:
+    image: influxdb:2
+    container_name: daq_influxdb
+    restart: unless-stopped
+    ports:
+      - "${INFLUX_PORT:-8086}:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_USERNAME:-admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_PASSWORD:-adminpassword123}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-mddp}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_BUCKET:-daq_telemetry}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:-mddp-super-secret-auth-token}
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+
+  daq-navi:
+    build:
+      context: .
+      dockerfile: services/daq_navi/Dockerfile
+    container_name: daq_navi
+    restart: unless-stopped
+    privileged: true
+    environment:
+      MOCKUP_MODE: ${MOCKUP_MODE:-false}
+      DESTINATION: ${DESTINATION:-postgresql}
+      DB_DSN: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-admin}@timescaledb:5432/${POSTGRES_DB:-daq_db}
+      MQTT_BROKER: mqtt-broker
+      MQTT_PORT: 1883
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_TOKEN: ${INFLUX_TOKEN:-mddp-super-secret-auth-token}
+      INFLUX_ORG: ${INFLUX_ORG:-mddp}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-daq_telemetry}
+    volumes:
+      - /dev:/dev
+      - /usr/lib:/usr/lib:ro
+      - /etc/biobdaq:/etc/biobdaq:ro
+      - ./services/daq_navi/config.json:/app/services/daq_navi/config.json
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      mqtt-broker:
+        condition: service_started
+      influxdb:
+        condition: service_started
+
+  portal:
+    image: nginx:alpine
+    container_name: daq_portal
+    restart: unless-stopped
+    ports:
+      - "${PORTAL_PORT:-8080}:80"
+    volumes:
+      - ./services/portal:/usr/share/nginx/html:ro
+
+  plotter:
+    build:
+      context: .
+      dockerfile: services/plotter/Dockerfile
+    container_name: daq_plotter
+    restart: unless-stopped
+    ports:
+      - "${PLOTTER_PORT:-8084}:8084"
+    environment:
+      DB_DSN: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-admin}@timescaledb:5432/${POSTGRES_DB:-daq_db}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
 
 volumes:
   tsdb_data:
+  mosquitto_data:
+  mosquitto_log:
+  influxdb_data:
+  influxdb_config:
