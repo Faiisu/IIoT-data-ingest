@@ -1,42 +1,20 @@
-# System Context Diagram
+# System Context
 
 ```mermaid
-graph TB
-  subgraph HW [Hardware Layer]
-    DAQ["🔌 Advantech DAQ Card<br/>(PCI-1716,BID#0 / USB-4716)"]
-  end
-
-  subgraph STORAGE [Local Storage & Buffering]
-    SpoolVol[("💾 Persistent Buffer Volume<br/>(daq_spool / SQLite zlib)")]
-  end
-
-  subgraph APP [DAQ Navi Service (Port 8081)]
-    WebUI["🌐 Web GUI & REST API<br/>(services/daq_navi/web/app.py)"]
-    Pipeline["⚡ Production Pipeline Daemon<br/>(services/daq_navi/core/production_acquisition.py)"]
-  end
-
-  subgraph DB [Database Layer (Port 5432)]
-    TimescaleDB[("🗄️ TimescaleDB<br/>daq_production_samples<br/>daq_production_gaps<br/>daq_telemetry (view)")]
-  end
-
-  subgraph UI [Visualization & Client Services]
-    Portal["🚪 Portal Gateway :8080"]
-    Plotter["📈 Plotly Visualizer :8084"]
-  end
-
-  DAQ -->|Analog Voltage Signals| Pipeline
-  Pipeline -->|1. Commit batches promptly| SpoolVol
-  Pipeline -->|2. Drain & Replay batches| TimescaleDB
-  Pipeline -->|3. Gap intervals & Health state| WebUI
-  WebUI -->|Start / Stop / Config| Pipeline
-  Portal -.->|Control Links| WebUI
-  TimescaleDB -->|SQL Query daq_telemetry| Plotter
-  TimescaleDB -->|SQL Query samples & gaps| WebUI
+graph LR
+    Operator[Operator browser] --> Portal[Portal :8080]
+    Operator --> DAQUI[DAQ Navi UI/API :8081]
+    Operator --> Plotter[Plotter UI/API :8084]
+    Portal -->|links| DAQUI
+    Portal -->|links| Plotter
+    DAQUI --> Control[DAQ Navi control process]
+    Control --> Driver[Advantech BioDAQ SDK and physical card]
+    Control --> Spool[(Persistent SQLite spool)]
+    Spool --> Writer[Production database writer]
+    Writer --> Production[(TimescaleDB production samples and gaps)]
+    DAQUI --> Production
+    Plotter -->|database queries| Production
+    Legacy[(Legacy/mockup tables)] -. separate schema/path .- DB[(PostgreSQL/TimescaleDB)]
 ```
 
-**What this shows**:
-- The Advantech DAQ hardware (e.g. `PCI-1716,BID#0`) feeds physical sensor signals into the Python production pipeline daemon.
-- Samples are first committed into a dedicated, persistent local SQLite disk buffer (`daq_spool` volume) with zlib compression, providing >24h local buffering during database outages.
-- In-flight or buffered batches drain automatically to TimescaleDB (`daq_production_samples`) when the connection is healthy.
-- Acquisition interruptions open gap records (`daq_production_gaps`) so graphs show missing segments.
-- Downstream visualizers (Plotter) query the compatibility view `daq_telemetry` containing exclusively validated physical samples.
+Production acquisition requires the supported Linux host's DAQNavi driver and device. The persistent spool buffers batches for database delivery. Legacy/mockup tables are not a projection of the production hypertable unless the database is separately configured to provide one. MQTT and InfluxDB are included services, but their presence alone does not imply that the production acquisition path publishes data to them.
