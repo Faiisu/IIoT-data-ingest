@@ -2,41 +2,50 @@
 
 ```mermaid
 graph LR
-  subgraph HW [USB-4716 Hardware]
-    AI["Analog Input Channels (ch0-ch7)"]
+  subgraph HW [Advantech DAQ Hardware]
+    AI["Analog Input Channels (ch0-ch3)<br/>2,000 Hz / channel"]
   end
 
-  subgraph Pipeline [stream_to_db.py / mockup_stream_to_db.py]
+  subgraph Pipeline [Production Acquisition Pipeline]
     direction TB
-    DAQThread["🧵 DAQ-Reader Thread"]
-    Queue[("📥 In-memory queue.Queue (maxsize=200)")]
-    WriterThread["🧵 Data Writer Thread"]
-    Stats[("📊 stats (dict with Lock)")]
-    MonitorThread["🧵 Monitor Thread"]
+    DAQReader["🧵 Acquisition Thread<br/>Advantech WaveformAiCtrl"]
+    Spool[("💾 Local SQLite Spool Buffer<br/>zlib payload compression<br/>SPOOL_MAX_BYTES quota")]
+    WriterThread["🧵 Spool Drain / Writer Thread<br/>Auto-replay & retry"]
+    GapsTracker["⚠️ Gap Tracker<br/>Records missing intervals"]
 
-    DAQThread -->|1. Poll hardware / mock generator| AI
-    DAQThread -->|2. Wall-clock timestamping & raw enqueue| Queue
-    DAQThread -->|Update stats| Stats
-    Queue -->|3. Dequeue batch| WriterThread
-    WriterThread -->|4. Parse interleaved samples & compute periodic ts| WriterThread
-    WriterThread -->|Update stats| Stats
-    MonitorThread -->|Read stats & log| Stats
+    DAQReader -->|1. Read interleaved samples| AI
+    DAQReader -->|2. Scale voltage & linear calibrate| DAQReader
+    DAQReader -->|3. Commit batch immediately| Spool
+    DAQReader -.->|On fault or full buffer| GapsTracker
+    GapsTracker -->|Record start_ns / cause| Spool
+
+    Spool -->|4. Oldest unacknowledged batch| WriterThread
+    WriterThread -->|5. Bulk INSERT ON CONFLICT DO NOTHING| TimescaleDB
+    WriterThread -->|6. Acknowledge & delete batch| Spool
   end
 
-  subgraph Targets [Configurable Destinations]
-    TimescaleDB[("🗄️ TimescaleDB (daq_samples)")]
-    MQTTBroker[("📡 MQTT Broker (daq/telemetry)")]
+  subgraph Database [TimescaleDB]
+    TimescaleDB[("🗄️ daq_production_samples<br/>(1-hr chunk hypertable)")]
+    GapsTable[("⚠️ daq_production_gaps")]
+    TelemetryView[("👁️ daq_telemetry (View)")]
   end
 
-  subgraph Consumer [Optional Consumer]
-    MQTTBridge["🔄 mqtt_to_db.py Subscriber"]
+  subgraph Consumers [Dashboards & APIs]
+    WebUI["🌐 DAQ Navi Web UI (:8081)<br/>/api/samples & /api/status"]
+    Plotter["📈 Plotter Service (:8084)"]
   end
 
-  WriterThread -->|"5a. execute_values (DESTINATION=database)"| TimescaleDB
-  WriterThread -->|"5b. publish JSON batch (DESTINATION=mqtt)"| MQTTBroker
-  MQTTBroker -->|"6. Subscribe & insert"| MQTTBridge
-  MQTTBridge --> TimescaleDB
+  WriterThread --> TimescaleDB
+  WriterThread --> GapsTable
+  TimescaleDB --- TelemetryView
+  TimescaleDB --> WebUI
+  GapsTable --> WebUI
+  TelemetryView --> Plotter
 ```
 
-**What this shows**: Data flows from the physical or synthetic analog input channels to the DAQ-Reader Thread. It is enqueued along with a wall-clock batch timestamp into a thread-safe Queue. The Data Writer Thread dequeues the batch, parses the interleaved samples, computes timestamps relative to the periodic anchor, and sends them to the configured destination (`DESTINATION` in `config.json`): either bulk inserted into TimescaleDB via `psycopg2` or published as a JSON payload to the MQTT Broker via `paho-mqtt`. An optional `mqtt_to_db.py` subscriber can bridge MQTT messages into TimescaleDB.
-
+**What this shows**:
+1. **Acquisition**: Physical analog signals from channels 0–3 are captured at 2,000 Hz per channel. Raw voltage and calibrated values are calculated per sample.
+2. **Buffering & Persistence**: Batches are committed immediately into a persistent SQLite spool file (`production-spool.sqlite3`) compressed with zlib. If TimescaleDB is down, capture continues uninterrupted for at least 24 hours.
+3. **Replay & Idempotence**: The background writer thread reads unacknowledged batches from the spool and flushes them into `daq_production_samples` using `ON CONFLICT (time, sample_id) DO NOTHING`. Upon successful database commit, the batch is pruned from the spool.
+4. **Gap Tracking**: Deliberate stops, driver errors, or buffer overflows create entries in `daq_production_gaps` to ensure gaps are rendered as blank intervals on charts.
+5. **Consumption**: Web API (`/api/samples`) and Plotter query the hypertable and compatibility view `daq_telemetry`.

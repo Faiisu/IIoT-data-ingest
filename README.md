@@ -1,301 +1,202 @@
 # MDDP Ingestion Control Suite
 
-The Multi-Device Data Ingestion Control Suite (MDDP) is a modular, high-performance software system designed to orchestrate and visualize time-series telemetry from hardware data acquisition systems (such as the Advantech USB-4716 DAQ Card) and robot dispensers.
+The Multi-Device Data Ingestion Control Suite (MDDP) is a modular, high-performance software system designed to orchestrate and visualize time-series telemetry from hardware data acquisition systems (Advantech DAQNavi) dispensers.
 
 This repository features:
-- **Portal Gateway (Port 8080)**: A centralized dashboard for auditing and launching active device control panels.
-- **DAQ USB-4716 Control Console (Port 8081)**: A dedicated Flask-SocketIO dashboard to configure, start, stop, and audit telemetry stream ingestion in real time.
-- **Database Plotter (Port 8084)**: A flexible multi-chart grid workspace powered by Plotly.js, displaying time-series telemetry retrieved dynamically from TimescaleDB hypertables.
+- **Portal Gateway (Port 8080)**: Centralized industrial dashboard for navigation and auditing active device control panels.
+- **DAQ Control Console & Web API (Port 8081)**: Dedicated Flask-SocketIO dashboard to configure, start, stop, calibrate channels, and audit telemetry streams with continuous gap rendering.
+- **Database Plotter (Port 8084)**: Dynamic multi-chart grid workspace powered by Plotly.js, displaying time-series telemetry from TimescaleDB hypertables.
 
 ---
 
 ## 1. System Architecture & Operation Principles
 
 ### A. User Operation Flow
-Shows how a user configures and runs the data acquisition and plotting pipeline.
+Shows how operators configure channels, execute production runs, inspect health, and view data.
 
 ```mermaid
 graph LR
-    Start([User Starts System]) --> StartDB[Start TimescaleDB Service]
-    StartDB --> RunScripts[Run Ingestion Control Suite run.sh / run.bat]
-    RunScripts --> LaunchPortal[Access Portal Gateway :8080]
+    Start([User Starts System]) --> ComposeUp[Docker Compose Up Stack]
+    ComposeUp --> AccessPortal[Open Portal Gateway :8080]
+    AccessPortal --> SelectDAQ[Select DAQ Control Panel :8081]
     
-    LaunchPortal --> SelectDAQ[Select DAQ USB-4716 Panel :8081]
-    SelectDAQ --> AdjustConfig[Modify & Save Configuration Parameters]
-    AdjustConfig --> StartStream{Start Stream Ingestion}
+    SelectDAQ --> AdjustConfig[Configure Channels 0-3, Units & Calibration]
+    AdjustConfig --> StartStream{Start Acquisition}
     
-    StartStream -->|Mock Mode| StartMock[Run mockup_stream_to_db.py]
-    StartStream -->|Real Hardware Mode| StartReal[Run stream_to_db.py]
+    StartStream -->|Production Mode| StartProd[Acquire from Physical DAQ Card]
+    StartStream -->|Mockup Mode| StartMock[Acquire Synthetic Waveform]
     
-    StartMock --> IngestionLoop[Telemetry batch-inserted into TimescaleDB]
-    StartReal --> IngestionLoop
+    StartProd --> SpoolCommit[Commit to Local SQLite Buffer daq_spool]
+    SpoolCommit --> TimescaleFlush[Async Flush to TimescaleDB daq_production_samples]
+    StartMock --> MockFlush[Direct Flush to daq_mockup_telemetry]
     
-    IngestionLoop --> OpenPlotter[Launch Database Plotter :8084]
-    OpenPlotter --> QueryLive[Select Channel & view live Plotly charts]
-    QueryLive --> Verify{Telemetry verified?}
-    
-    Verify -->|No| AdjustConfig
-    Verify -->|Yes| EndIngestion[Stop Stream & shutdown via stop.sh]
+    TimescaleFlush --> OpenPlotter[View Real-Time Data & Plotter :8084]
+    MockFlush --> OpenPlotter
     
     style Start fill:#e1f5e1,stroke:#4caf50,color:#000
-    style LaunchPortal fill:#e3f2fd,stroke:#2196f3,color:#000
+    style AccessPortal fill:#e3f2fd,stroke:#2196f3,color:#000
     style StartStream fill:#fff3e0,stroke:#ff9800,color:#000
-    style Verify fill:#fce4ec,stroke:#e91e63,color:#000
+    style SpoolCommit fill:#ede7f6,stroke:#673ab7,color:#000
+    style TimescaleFlush fill:#e8f5e9,stroke:#2e7d32,color:#000
 ```
 
 ### B. Technical Architecture Diagram
-Depicts the layered structure of the tech stack and the data pathways across services.
+Depicts the layered structure of the tech stack and data pathways across services.
 
 ```mermaid
 graph LR
     subgraph "Presentation Layer"
-        Portal[Portal Gateway<br/>Vanilla HTML / CSS / JS]
-        DAQView[DAQ UI Panel<br/>Bootstrap + SocketIO]
-        PlotView[Plotter UI<br/>Plotly.js dynamic grid]
+        Portal[Portal Gateway<br/>Vanilla HTML / CSS / JS :8080]
+        DAQView[DAQ Web Console<br/>Bootstrap + Socket.IO :8081]
+        PlotView[Plotter UI<br/>Plotly.js :8084]
     end
 
     subgraph "Application & Service Layer"
-        WebServer[Python http.server<br/>Port 8080]
-        DAQGUISvc["DAQ Control Server<br/>Flask + SocketIO (Port 8081)"]
+        DAQGUISvc["DAQ Control Server & REST API<br/>services/daq_navi/web/app.py (Port 8081)"]
+        ProductionPipeline["Production Pipeline Daemon<br/>services/daq_navi/core/production_acquisition.py"]
         PlotSvc["Analytics & Plotter Service<br/>Flask Stateless Web API (Port 8084)"]
-        DAQStream[Ingestion Process<br/>stream_to_db.py]
+    end
+
+    subgraph "Local Storage & Persistence"
+        SpoolVol[("💾 Persistent Spool Volume<br/>daq_spool / SQLite zlib")]
     end
 
     subgraph "Data & Messaging Layer"
-        TimescaleDB[(TimescaleDB / PostgreSQL<br/>Port 5432)]
+        TimescaleDB[("🗄️ TimescaleDB / PostgreSQL (Port 5432)<br/>daq_production_samples<br/>daq_production_gaps<br/>daq_telemetry (View)")]
         MQTTBroker[MQTT Broker<br/>Port 1883]
     end
 
     Portal -.->|links| DAQView
     Portal -.->|links| PlotView
 
-    DAQView -->|WebSockets| DAQGUISvc
-    DAQGUISvc -->|Popen subprocess| DAQStream
+    DAQView -->|WebSockets & REST| DAQGUISvc
+    DAQGUISvc -->|Subprocess Control| ProductionPipeline
     PlotView -->|REST queries| PlotSvc
 
-    DAQStream -->|psycopg2 bulk INSERT| TimescaleDB
-    DAQStream -.->|paho-mqtt publish| MQTTBroker
-    PlotSvc -->|psycopg2 SELECT queries| TimescaleDB
+    ProductionPipeline -->|1. Immediate commit| SpoolVol
+    SpoolVol -->|2. Asynchronous replay/drain| ProductionPipeline
+    ProductionPipeline -->|3. Bulk INSERT ON CONFLICT| TimescaleDB
+    ProductionPipeline -.->|Optional publish| MQTTBroker
+    PlotSvc -->|SELECT queries on daq_telemetry| TimescaleDB
 
     style Portal fill:#61dafb,stroke:#00d8ff,color:#000
     style DAQGUISvc fill:#ff6b6b,stroke:#ff0000,color:#000
+    style SpoolVol fill:#9c27b0,stroke:#4a148c,color:#fff
     style TimescaleDB fill:#4caf50,stroke:#2e7d32,color:#000
     style MQTTBroker fill:#ff9800,stroke:#e65100,color:#000
 ```
 
-### C. Data Flow Diagram
-Maps internal threading, buffering, and output target flows of the streaming pipeline.
+---
 
-```mermaid
-graph LR
-    subgraph HW [USB-4716 Hardware]
-        AI["Analog Input Channels (ch0-ch7)"]
-    end
+## 2. Production Acquisition Features
 
-    subgraph Pipeline [stream_to_db.py]
-        direction TB
-        DAQThread["🧵 DAQ-Reader Thread"]
-        Queue[("📥 In-memory queue.Queue (maxsize=200)")]
-        WriterThread["🧵 Data Writer Thread"]
-        Stats[("📊 Stats Lock & Dict")]
-        MonitorThread["🧵 Monitor Thread"]
-
-        DAQThread -->|1. Poll via getDataF64| AI
-        DAQThread -->|2. Wall-clock timestamping & raw enqueue| Queue
-        DAQThread -->|Update stats| Stats
-        Queue -->|3. Dequeue batch| WriterThread
-        WriterThread -->|4. Parse interleaved samples & compute periodic ts| WriterThread
-        WriterThread -->|Update stats| Stats
-        MonitorThread -->|Read stats & log stdout| Stats
-    end
-
-    subgraph Targets [Configurable Destinations]
-        TimescaleDB[("🗄️ TimescaleDB (daq_samples)")]
-        MQTTBroker[("📡 MQTT Broker (daq/telemetry)")]
-    end
-
-    WriterThread -->|"5a. execute_values (DESTINATION=database)"| TimescaleDB
-    WriterThread -->|"5b. publish JSON batch (DESTINATION=mqtt)"| MQTTBroker
-```
+- **High-Rate 4-Channel Acquisition**: Continuous sampling at up to 2,000 Hz per channel across channels 0–3 using Advantech BioDAQ SDK (`PCI-1716,BID#0`).
+- **Resilient Local Spool Buffering**: All captured batches are committed first to a local SQLite buffer with zlib compression on the persistent `daq_spool` Docker volume (`128 GiB` quota). Supports over 24 hours (up to 7 days) of physical buffering during database outages without memory leaks or data loss.
+- **Automatic Replay with Idempotence**: Background writer thread continuously flushes batches to TimescaleDB. Unique `(time, sample_id)` keys prevent duplicated samples upon network or database restoration.
+- **Traceable Calibration & Raw Dual-Storage**: Stores both `raw_voltage` and `calibrated_value` alongside physical `unit` and `calibration_revision`. Historical records preserve original interpretation and allow reanalysis.
+- **Explicit Acquisition Gap Tracking**: Distinguishes intentional stops, process crashes, and driver failures via `daq_production_gaps`. UI charts visually render discontinuities rather than false interpolated curves.
+- **Strict Mockup Isolation**: Mockup runs require explicit operator selection and store telemetry in a segregated table (`daq_mockup_telemetry`), ensuring zero synthetic data in production views.
+- **Compatibility View `daq_telemetry`**: Provides downstream visualizers (e.g. Plotter) seamless access to production data (`WHERE provenance = 'physical_daq'`) while eliminating untraceable legacy telemetry.
+- **Configurable Retention**: Default 30-day raw retention enforced by TimescaleDB policies, adjustable dynamically via the Web UI (`/api/retention`).
 
 ---
 
-## 2. Tech Stack
+## 3. Quick Start & Deployment
 
-- **Frontend**: Vanilla HTML5, CSS Grid/Flexbox matching the Unified Industrial Cockpit Design Tokens, Javascript (ES6), Socket.io Client, and Plotly.js.
-- **Backend Services**: Python 3, Flask, Flask-SocketIO, Eventlet (for high-concurrency event loops).
-- **Ingestion Pipeline**: Multi-threaded Python pipeline, `psycopg2` bulk inserts, Advantech DAQNavi driver interface.
-- **Database**: TimescaleDB / PostgreSQL.
+### Production Container Stack (Docker Compose)
 
----
-
-## 3. Quick Start & Deployment Options
-
-The MDDP Ingestion Control Suite supports two deployment paths tailored to target operating systems and environment needs:
-
-| Operating System | Recommended Deployment Method | Primary Setup Commands | Full Guide Link |
-| :--- | :--- | :--- | :--- |
-| **Linux (Ubuntu/Debian)** | **Native Script-Based Setup** (`.sh`) | `./deploy/linux/install_deps.sh`<br/>`./deploy/linux/run.sh` | [DEPLOY_LINUX.md](DEPLOY_LINUX.md) |
-| **Windows 10/11** | **Native Script-Based Setup** (`.bat`) | `deploy\windows\install_deps.bat`<br/>`deploy\windows\run.bat`<br/>`powershell .\deploy\windows\setup_task_scheduler.ps1` | [DEPLOY_WINDOWS.md](DEPLOY_WINDOWS.md) |
-
----
-
-### Option A: Linux Deployment (Script-Based)
-
-Deploy all web microservices using native Linux shell scripts:
+Launch all microservices (TimescaleDB, Mosquitto, InfluxDB, Portal, Plotter, and DAQ Navi):
 
 ```bash
-# 1. Install dependencies into virtualenv
-./deploy/linux/install_deps.sh
-
-# 2. Launch background application services
-./deploy/linux/run.sh
-
-# 3. Stop background services
-./deploy/linux/stop.sh
+docker compose up -d
 ```
 
-See [DEPLOY_LINUX.md](DEPLOY_LINUX.md) for full instructions and hardware connectivity configuration.
-
----
-
-### Option C: Containerized Full-Stack & Interactive Setup Wizard (Linux)
-
-For production deployment with containerized services (TimescaleDB, Mosquitto, InfluxDB, Portal, Plotter, and DAQ Navi), run the interactive setup wizard:
-
+Verify service health:
 ```bash
-# Non-interactive prerequisite check:
-./scripts/setup_wizard.sh --check-only
-
-# Interactive step-by-step setup wizard:
-./scripts/setup_wizard.sh
+docker compose ps
+curl http://localhost:8081/api/health
 ```
 
-The wizard inspects Linux kernel and OS prerequisites, checks for Advantech PCI-1716 hardware via `lspci`, guides driver installation, provisions Docker and Docker Compose, configures `.env` and `config.json`, and launches the full stack with health checks.
+Access web applications in your browser:
+- **Portal Gateway**: `http://localhost:8080`
+- **DAQ Control Console**: `http://localhost:8081`
+- **Database Plotter**: `http://localhost:8084`
 
 ---
 
-### Option B: Windows Deployment (Script-Based)
+## 4. Configuration Reference
 
-For 24/7 unattended Windows operation with native Advantech USB-4716 hardware drivers:
+The acquisition pipeline is configured via [`services/daq_navi/config.json`](services/daq_navi/config.json) and managed via the Web UI.
 
-```cmd
-:: 1. Install dependencies into virtualenv
-deploy\windows\install_deps.bat
-
-:: 2. Test manual execution
-deploy\windows\run.bat
-
-:: 3. Setup 24/7 background operation in Task Scheduler (Run as Admin in PowerShell)
-powershell -ExecutionPolicy Bypass -File .\deploy\windows\setup_task_scheduler.ps1
-```
-
-See [DEPLOY_WINDOWS.md](DEPLOY_WINDOWS.md) for complete details on Windows Task Scheduler, automatic crash recovery via `watchdog.ps1`, and firewall rules.
-
----
-
-## 4. Configuration Documentation
-
-The hardware interface, database connection parameters, and calibration parameters are configured via [services/daq_navi/config.json](services/daq_navi/config.json).
-
-### Output Destination & MQTT Parameters
-| Parameter | Default Value | Description |
+### Hardware & Sampling Settings
+| Parameter | Default | Description |
 |:---|:---|:---|
-| `DESTINATION` | `database` | Output target mode (`database` for direct TimescaleDB, `mqtt` for MQTT Broker publishing). |
-| `MQTT_BROKER` | `localhost` | Hostname or IP address of the target MQTT broker. |
-| `MQTT_PORT` | `1883` | Port number of the MQTT broker service. |
-| `MQTT_TOPIC` | `daq/telemetry` | MQTT topic where serialized JSON sample batches are published. |
-| `MQTT_QOS` | `0` | MQTT Quality of Service level (`0`: At most once, `1`: At least once, `2`: Exactly once). |
-| `DB_DSN` | `postgresql://admin:admin@172.21.108.86:5432/daq_db` | Connection DSN string for production TimescaleDB service. |
-| `MOCKUP_DB_DSN` | `postgresql://admin:admin@localhost:5432/daq_db` | Connection DSN string for localized database testing. |
-| `DEVICE_DESCRIPTION` | `USB-4716,BID#0` | Unique hardware identifier matching the Advantech DAQ card name. |
+| `DEVICE_DESCRIPTION` | `PCI-1716,BID#0` | Hardware device identifier for Advantech BioDAQ driver. |
+| `START_CHANNEL` | `0` | Starting physical analog input channel index. |
+| `CHANNEL_COUNT` | `4` | Number of enabled analog input channels (0 to 3). |
+| `CLOCK_RATE` | `2000` | Sampling frequency in Hz per channel. |
+| `SECTION_LENGTH` | `500` | Hardware acquisition section length (samples per channel per read). |
 
-### Ingestion Parameter Tuning
-| Parameter | Default Value | Description |
+### Storage & Retention Parameters
+| Parameter | Default | Description |
 |:---|:---|:---|
-| `START_CHANNEL` | `0` | Starting index of analog input channel scan. |
-| `CHANNEL_COUNT` | `1` | Number of analog channels to scan (max 8 channels on single-ended connections). |
-| `CLOCK_RATE` | `2000` | Hardware scanning frequency (samples per second per channel). |
-| `SECTION_LENGTH` | `500` | Ingestion batch buffer size. Determines chunk size transferred to queue. |
-| `QUEUE_MAXSIZE` | `200` | Maximum limit of the in-memory threading queue to protect against memory leaks. |
-| `DB_PAGE_SIZE` | `1000` | Number of telemetry rows packed into a single database transactional `INSERT`. |
+| `DESTINATION` | `postgresql` | Primary storage backend (`postgresql` / `timescaledb`). |
+| `DB_DSN` | `postgresql://admin:admin@timescaledb:5432/daq_db` | Connection DSN string for TimescaleDB. |
+| `DB_PRODUCTION_TABLE` | `daq_production_samples` | Hypertable storing physical production telemetry. |
+| `DB_MOCKUP_TABLE` | `daq_mockup_telemetry` | Segregated table for synthetic mockup data. |
+| `DB_RETENTION_DAYS` | `30` | Rolling raw telemetry retention window in days. |
+| `SPOOL_DIR` | `/var/lib/daq_navi/spool` | Path to persistent SQLite disk buffer. |
+| `SPOOL_MAX_BYTES` | `137438953472` | Spool disk buffer capacity quota (128 GiB). |
 
-### Calibration & Scale Configs
-The `SCALE_CONFIGS` block maps raw analog voltages (1V to 5V or 0V to 10V) to physical instrument metrics (e.g., pressure, flow, temperature).
+### Channel Calibration Schema (`CHANNELS`)
+Every enabled channel specifies sensor labeling, voltage input range, and linear scaling:
 ```json
-"SCALE_CONFIGS": {
+"CHANNELS": {
   "0": {
     "enabled": true,
-    "low_voltage": 1.0,
-    "high_voltage": 5.0,
-    "low_value": -100.0,
-    "high_value": 100.0
+    "label": "pressure-ch0",
+    "unit": "kPa",
+    "signal_type": "SingleEnded",
+    "value_range": "V_0To5",
+    "scale": {
+      "enabled": true,
+      "low_voltage": 1.0,
+      "high_voltage": 5.0,
+      "low_value": -100.0,
+      "high_value": 100.0,
+      "revision": "initial"
+    }
   }
 }
 ```
-*If `enabled` is `true`, raw voltages reading from the channel are mapped linearly from `[low_voltage, high_voltage]` range into the `[low_value, high_value]` unit spectrum prior to transmission/storage.*
 
 ---
 
-## 5. MQTT Telemetry & Bridge
+## 5. Web Control & REST API
 
-When `DESTINATION` is set to `mqtt`, the DAQ streaming pipeline publishes JSON telemetry batches directly to the configured MQTT broker.
+| Endpoint | Method | Description |
+|:---|:---|:---|
+| `/api/status` | `GET` | Returns runtime health, running state, buffer bytes, pending replay count, and recent gaps. |
+| `/api/health` | `GET` | Healthcheck probe; returns `200 OK` when healthy, `503 Service Unavailable` on faults or stopped expected runs. |
+| `/api/config` | `GET` | Retrieves effective saved acquisition configuration. |
+| `/api/config` | `POST` | Updates and validates configuration settings (preserves existing settings and applies changes safely). |
+| `/api/start` | `POST` | Starts physical production (`mode: "production"`) or synthetic mockup (`mode: "mockup"`). |
+| `/api/stop` | `POST` | Drains pending buffers and gracefully halts acquisition. |
+| `/api/samples?channel=N` | `GET` | Queries recent production samples with voltage, calibrated values, units, and gap boundaries. |
+| `/api/retention` | `GET` | Returns active TimescaleDB hypertable retention policy. |
 
-### JSON Payload Format
-```json
-[
-  {
-    "time": "2026-07-20T11:40:00.000000+00:00",
-    "channel": 0,
-    "value": 2.45
-  }
-]
-```
+---
 
-### Standalone MQTT-to-DB Subscriber
-To consume telemetry from the MQTT broker and persist it into TimescaleDB:
+## 6. Testing & Quality Verification
+
+Run unit test suites:
 ```bash
-uv run services/daq_navi/mqtt_to_db.py
+# Web UI and REST API tests (41 tests)
+docker exec daq_navi python3 -m unittest tests.test_production_web -v
+
+# Core acquisition, timing, and buffer tests (22 tests)
+PYTHONPATH=. .venv/bin/python -m unittest services/daq_navi/tests/test_production_acquisition.py
+
+# End-to-end fault and outage qualification scripts
+PYTHONPATH=. DAQ_TEST_DB_DSN="postgresql://admin:admin@localhost:5432/daq_navi_test_*" .venv/bin/python services/daq_navi/tests/qualify_web_faults.py
 ```
-
----
-
-## 6. Project Structure
-
-- `services/`: Unified microservices folder.
-  - `portal/`: Portal Gateway static site files (`index.html`, `app.js`, `style.css`).
-  - `daq_navi/`: Universal DAQ Navi Controller & Ingestion daemon (`app.py`, `stream_to_db.py`, `mockup_stream_to_db.py`, `mqtt_to_db.py`, `destinations.py`).
-  - `musashi_ii/`: Musashi II Dispenser Controller service (`app.py`, `read_musashi.py`, `database_handler.py`).
-  - `musashi_iv/`: Musashi IV Dispenser Controller service (`app.py`, `stream_to_db.py`, `api_client.py`).
-  - `plotter/`: Database Telemetry Visualizer service (`app.py`, static asset grid layout).
-- `shared/`: Shared Python utilities (`config.py`, `db.py`, `process_manager.py`).
-- `scripts/`: System scripts and SQL definitions (`scripts/sql/db_setup.sql`).
-- `deploy/`: Platform deployment runners for Linux and Windows (`deploy/linux/`, `deploy/windows/`).
-- `docs/`: Design system specifications, diagrams, and architecture reference files.
-
----
-
-## 7. Troubleshooting Tips
-
-### ⚠️ Common Issue: Port Conflict
-- **Symptom**: `[SYSTEM] Warning: PID files detected` or failed socket binding warnings during startup.
-- **Solution**: Execute `./deploy/linux/stop.sh` to clear dangling processes. If ports remain blocked, check processes listening on ports:
-  ```bash
-  kill -9 $(lsof -t -i :8080 -i :8081 -i :8084)
-  ```
-
-### ⚠️ Common Issue: TimescaleDB Connection Timeout
-- **Symptom**: Log reports `psycopg2.OperationalError: connection to server at ... failed: Connection timed out`.
-- **Solution**: Make sure TimescaleDB service is running and accessible. If connecting to an external server DSN, verify host accessibility via pinging:
-  ```bash
-  ping 172.21.108.86
-  ```
-
-### 💡 Recommendation: Running Mockup Mode for Local Work
-If you are developing locally without an active USB-4716 hardware card:
-1. Initialize the mockup database:
-   ```sql
-   CREATE DATABASE mockup;
-   ```
-2. Enable mockup mode in the DAQ Control Console (Port 8081).
-3. The server will stream synthetic sinusoidal telemetry to the mockup database, enabling offline pipeline testing.
