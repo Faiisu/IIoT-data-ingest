@@ -35,7 +35,9 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
-_WRITER_BATCH_GROUP = 8
+# Keep each database transaction bounded when section length grows. A group of
+# eight 5,000-sample sections can exceed the destination statement timeout.
+_WRITER_BATCH_GROUP = 1
 
 
 class AcquisitionFault(RuntimeError):
@@ -605,7 +607,10 @@ class AdvantechDaq:
             and read_duration_ns >= expected_read_ns // 2
         )
         self.empty_reads = 0 if returned else self.empty_reads + 1
-        if self.empty_reads >= 3:
+        # getDataF64 can return an empty timeout while the SDK is filling a
+        # section. Allow its expected collection time plus two polling cycles.
+        max_empty_reads = max(3, math.ceil(self.cfg.SECTION_LENGTH / self.cfg.CLOCK_RATE) + 2)
+        if self.empty_reads >= max_empty_reads:
             raise AcquisitionFault("daq_stalled")
         return list(data[:returned]), end_ns
 

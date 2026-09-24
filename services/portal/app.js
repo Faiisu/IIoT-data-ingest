@@ -5,7 +5,7 @@
 
 // Configuration of registered edge services
 const EDGE_SERVICES = [
-    { id: 'daq', name: 'DAQ USB-4716', port: '8081', rowId: 'row-daq' },
+    { id: 'daq', name: 'DAQ Config Center', port: '8081', rowId: 'row-daq' },
     { id: 'musashi-ii', name: 'MUSASHI II', port: '8082', rowId: 'row-musashi-ii' },
     { id: 'musashi-iv', name: 'MUSASHI IV', port: '8083', rowId: 'row-musashi-iv' }
 ];

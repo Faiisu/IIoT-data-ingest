@@ -84,6 +84,40 @@ class FakeDestination:
 
 
 class ProductionAcquisitionTests(unittest.TestCase):
+    def test_section_longer_than_read_timeout_does_not_fault_before_data_arrives(self):
+        cfg = configuration(CLOCK_RATE=1000, SECTION_LENGTH=5000)
+        adapter = object.__new__(AdvantechDaq)
+        adapter.cfg = cfg
+        adapter._bio_failed = lambda result: False
+        adapter.empty_reads = 0
+        adapter.device = MagicMock()
+        adapter.device.getDataF64.side_effect = [
+            (SimpleNamespace(name="WarningFuncTimeout"), 0, []) for _ in range(5)
+        ] + [(SimpleNamespace(name="Success"), cfg.USER_BUFFER_SIZE,
+               [0.0] * cfg.USER_BUFFER_SIZE)]
+
+        for _ in range(5):
+            samples, _ = adapter.read(cfg.USER_BUFFER_SIZE)
+            self.assertEqual(samples, [])
+        samples, _ = adapter.read(cfg.USER_BUFFER_SIZE)
+        self.assertEqual(len(samples), cfg.USER_BUFFER_SIZE)
+        self.assertEqual(adapter.empty_reads, 0)
+
+    def test_section_read_still_faults_after_expected_wait(self):
+        cfg = configuration(CLOCK_RATE=1000, SECTION_LENGTH=5000)
+        adapter = object.__new__(AdvantechDaq)
+        adapter.cfg = cfg
+        adapter._bio_failed = lambda result: False
+        adapter.empty_reads = 0
+        adapter.device = MagicMock()
+        adapter.device.getDataF64.return_value = (
+            SimpleNamespace(name="WarningFuncTimeout"), 0, []
+        )
+
+        with self.assertRaisesRegex(AcquisitionFault, "daq_stalled"):
+            for _ in range(7):
+                adapter.read(cfg.USER_BUFFER_SIZE)
+
     def test_spool_capacity_counter_recovers_after_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             spool = DurableSpool(Path(directory), 4096)

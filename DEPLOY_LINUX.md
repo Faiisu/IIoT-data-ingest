@@ -24,7 +24,7 @@ docker compose ps
 curl http://localhost:8081/api/health
 ```
 
-Use the portal at `http://localhost:8080` and DAQ Navi at `http://localhost:8081`. Development mounts make source visible inside containers; restart the affected service if a code change does not take effect. For the base Compose file without the override:
+Use the portal at `http://localhost:8080` and DAQ Config Center at `http://localhost:8081`; DAQ APIs use the same port. Development mounts make source visible inside containers; restart the affected service if a code change does not take effect. For the base Compose file without the override:
 
 ```bash
 docker compose -f docker-compose.yml up -d --build
@@ -51,7 +51,7 @@ Start production acquisition only after checking the saved configuration, signal
 | Service | Default host port |
 |:---|---:|
 | Portal | 8080 |
-| DAQ Navi | 8081 |
+| DAQ Config Center / DAQ Navi API | 8081 |
 | TimescaleDB/PostgreSQL | 5432 |
 | Mosquitto | 1883 |
 | InfluxDB | 8086 |
