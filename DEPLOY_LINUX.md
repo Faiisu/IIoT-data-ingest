@@ -1,6 +1,6 @@
 # Linux Deployment Guide
 
-This repository runs its services with Docker Compose. Physical DAQ acquisition requires a Linux host where the Advantech BioDAQ SDK, libraries, device files, and configuration are installed and visible at the paths mounted by Compose.
+Linux is the only supported deployment host for this repository's Compose stack. The DAQ service mounts Linux host device files and Advantech libraries into its container. Physical acquisition also requires the supported Advantech BioDAQ SDK, driver, hardware, and configuration on that host. Windows deployment is not supported.
 
 ## Prepare
 

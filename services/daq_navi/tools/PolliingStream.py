@@ -31,9 +31,6 @@ $NoKeywords:  $
 */
 /******************************************************************************
 *
-* Windows Example:
-*    PollingStramingAI.py
-*
 * Example Category:
 *    AI
 *

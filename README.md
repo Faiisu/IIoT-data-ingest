@@ -1,6 +1,6 @@
 # MDDP Ingestion Control Suite
 
-A Docker Compose workspace for configuring Advantech DAQNavi acquisition, storing time-series data, and viewing service status. Physical DAQ acquisition requires a supported Linux host with the Advantech DAQNavi/BioDAQ driver and device available to the container. Mockup acquisition is available for demonstrations and development.
+A Linux-only Docker Compose workspace for configuring Advantech DAQNavi acquisition, storing time-series data, and viewing service status. Linux is required because the DAQ container mounts host device files and Advantech libraries. Physical acquisition requires the supported Linux host driver and DAQ hardware. Windows deployment is not supported. Mockup acquisition is available for demonstrations and development on Linux.
 
 - **Portal** (`:8080`): links to the service interfaces.
 - **DAQ Navi** (`:8081`): acquisition configuration, start/stop controls, status, and sample inspection.
@@ -83,7 +83,7 @@ docker compose ps
 curl http://localhost:8081/api/health
 ```
 
-Open Portal at `http://localhost:8080` and DAQ Navi at `http://localhost:8081`. See [Linux deployment](DEPLOY_LINUX.md) for hardware prerequisites and operations. Windows Docker usage does not provide the Linux device/library mounts required for physical DAQ acquisition; see [Windows notes](DEPLOY_WINDOWS.md).
+Open Portal at `http://localhost:8080` and DAQ Navi at `http://localhost:8081`. See [Linux deployment](DEPLOY_LINUX.md) for the required host setup and operations. This stack must be deployed on Linux; Windows is unsupported.
 
 ---
 

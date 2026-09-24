@@ -5,7 +5,7 @@ services.daq_navi.app
 ─────────────────────
 Public entrypoint seam for the DAQ Navi Web Control Panel & REST API.
 Delegates to `services.daq_navi.web.app` while preserving backward compatibility
-for external runners (Docker Compose, Linux run.sh, Windows run.bat, unit tests).
+for external runners (Docker Compose, Linux scripts, and unit tests).
 """
 
 import os

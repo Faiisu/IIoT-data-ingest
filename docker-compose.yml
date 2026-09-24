@@ -46,6 +46,8 @@ services:
       - influxdb_data:/var/lib/influxdb2
       - influxdb_config:/etc/influxdb2
 
+  # Linux host required: DAQ hardware, device files, and vendor SDK libraries
+  # are mounted from the host into this container.
   daq-navi:
     build:
       context: .
