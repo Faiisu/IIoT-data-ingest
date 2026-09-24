@@ -48,7 +48,7 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .port-tag { color: #c5d8e8; font: 9px var(--mono); letter-spacing: .05em; }
 .port-tag b { color: var(--secondary); font-weight: 600; }
 .main-content { max-width: 1720px; min-height: 100vh; margin-left: 250px; padding: 0 38px 22px; }
-.topbar { position: sticky; top: 0; z-index: 4; display: flex; justify-content: space-between; align-items: center; min-height: 66px; margin: 0 -38px; padding: 0 38px; border-bottom: 1px solid var(--primary-dark); background: rgb(10, 69, 125); color: var(--white); backdrop-filter: blur(14px); }
+.topbar { position: sticky; top: 0; z-index: 4; display: flex; justify-content: space-between; align-items: center; min-height: 66px; margin: 0 -38px; padding: 0 38px; border-bottom: 1px solid var(--primary-dark); background: #004280; color: var(--white); backdrop-filter: blur(14px); }
 .breadcrumbs { color: #d4e2ef; font-size: 8px; }
 .breadcrumbs span { padding: 0 8px; color: #8fb1cf; }
 .top-actions { display: flex; align-items: center; gap: 16px; }
