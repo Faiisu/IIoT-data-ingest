@@ -3,13 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DAQ USB-4716 Control Console</title>
-    <!-- Outfit Font & Monospace -->
+    <meta name="theme-color" content="#f4f6f3">
+    <title>DAQ USB-4716 | MDDP Data Ingestion</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
-    <!-- Socket.IO Client Library -->
     <script src="/static/vendor/socket.io.min.js"></script>
     <script>
         if (typeof io === 'undefined') {
@@ -19,24 +18,14 @@
 </head>
 <body>
     <div class="dashboard-container">
-        <!-- Header -->
         <header class="main-header">
             <div class="brand">
-                <a href="javascript:location.href=window.location.protocol+'//'+window.location.hostname+':8080'" class="back-link" title="Return to Ingestion Portal Gateway">
-                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                        <line x1="19" y1="12" x2="5" y2="12"></line>
-                        <polyline points="12 19 5 12 12 5"></polyline>
-                    </svg>
+                <a href="/" class="back-link" aria-label="Back to MDDP data ingestion portal">
+                    <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M16 3 4 9.5v13L16 29l12-6.5v-13L16 3Z"/><path d="m4.5 9.7 11.5 6.5 11.5-6.5M16 16.5V29M10 6.3l12 6.6"/></svg></span>
                 </a>
-                <script>
-                    (function() {
-                        var el = document.currentScript ? document.currentScript.previousElementSibling : document.querySelector('.back-link');
-                        if (el) el.href = (window.location.protocol || 'http:') + '//' + (window.location.hostname || 'localhost') + ':8080';
-                    })();
-                </script>
                 <div class="brand-text">
-                    <h1>DAQ USB-4716 CONTROL PANEL</h1>
-                    <span class="sub-text">MDDP DATA INGESTION SUITE</span>
+                    <strong>MDDP</strong>
+                    <span class="sub-text">DATA INGESTION</span>
                 </div>
             </div>
             <div class="header-status">
@@ -48,7 +37,12 @@
             </div>
         </header>
 
-        <!-- Live Telemetry Section -->
+        <div class="page-intro">
+            <div class="eyebrow">SERVICE 01 / DAQ USB-4716</div>
+            <h1>DAQ control console</h1>
+            <p>Configure acquisition, manage the pipeline, and monitor live measurements.</p>
+        </div>
+
         <section class="live-telemetry">
             <div class="telemetry-grid">
                 <div class="telemetry-card">
@@ -70,310 +64,323 @@
             </div>
         </section>
 
-        <!-- Main Splits: Config Editor & Process Monitoring console -->
         <div class="main-layout">
-            <!-- Left Side: Config Editor Form -->
             <section class="config-panel">
                 <div class="panel-header">
-                    <h2>SYSTEM CONFIGURATION</h2>
-                    <span class="panel-subtitle">Edit config.json parameters</span>
+                    <h2>System configuration</h2>
+                    <span class="panel-subtitle">Acquisition, destinations, and sensor settings</span>
                 </div>
+                <nav class="config-nav" aria-label="Configuration sections">
+                    <a href="#config-startup"><span>01</span> Startup</a>
+                    <a href="#config-hardware"><span>02</span> Hardware</a>
+                    <a href="#config-output"><span>03</span> Output</a>
+                    <a href="#config-sensors"><span>04</span> Sensors</a>
+                    <button type="submit" form="config-form" class="nav-save-btn">Save changes</button>
+                </nav>
                 <form id="config-form" class="config-form">
-                    <!-- Startup & Automation Settings -->
-                    <div class="section-divider-title">STARTUP & AUTOMATION</div>
-                    <div class="form-row">
-                        <div class="form-group flex-2 checkbox-group">
-                            <input type="checkbox" id="AUTO_START_ON_STARTUP" name="AUTO_START_ON_STARTUP" class="custom-checkbox">
-                            <label for="AUTO_START_ON_STARTUP">Auto-start Ingestion Process on Application Startup</label>
-                        </div>
-                        <div class="form-group flex-1">
-                            <label for="AUTO_START_MODE">Startup Execution Mode</label>
-                            <select id="AUTO_START_MODE" name="AUTO_START_MODE" class="custom-select">
-                                <option value="mockup">Mockup Simulator (Synthetic Waveform)</option>
-                                <option value="production">Physical DAQ (production)</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    <!-- Device & Channel Settings -->
-                    <div class="section-divider-title">HARDWARE & SAMPLING</div>
-                    <div class="form-row">
-                        <div class="form-group flex-2">
-                            <label for="DEVICE_DESCRIPTION">Device Description / Connection Port</label>
-                            <div class="scan-input-group">
-                                <input type="text" id="DEVICE_DESCRIPTION" name="DEVICE_DESCRIPTION" required placeholder="e.g. USB-4716,BID#0">
-                                <button type="button" id="btn-scan-usb" class="btn-scan-usb" title="Scan Host PC for USB & DAQ Ports">
-                                    <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round" class="scan-icon">
-                                        <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
-                                    </svg>
-                                    <span>SCAN USB</span>
-                                </button>
-                            </div>
-                            <div id="scanned-devices-menu" class="scanned-devices-menu hidden"></div>
-                        </div>
-                        <div class="form-group flex-1">
-                            <label for="PROFILE_PATH">Profile Path</label>
-                            <input type="text" id="PROFILE_PATH" name="PROFILE_PATH">
-                        </div>
-                    </div>
-
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="DEVICE_ID">Device ID</label>
-                            <input type="text" id="DEVICE_ID" name="DEVICE_ID" required>
-                        </div>
-                        <div class="form-group">
-                            <label for="DB_RETENTION_DAYS">Raw retention (days)</label>
-                            <input type="number" id="DB_RETENTION_DAYS" name="DB_RETENTION_DAYS" min="1" required>
-                        </div>
-                    </div>
-
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="START_CHANNEL">Start Channel</label>
-                            <input type="number" id="START_CHANNEL" name="START_CHANNEL" min="0" max="7" required>
-                        </div>
-                        <div class="form-group">
-                            <label for="CHANNEL_COUNT">Channel Count</label>
-                            <input type="number" id="CHANNEL_COUNT" name="CHANNEL_COUNT" min="1" max="8" required>
-                        </div>
-                        <div class="form-group">
-                            <label for="CLOCK_RATE">Clock Rate (Hz)</label>
-                            <input type="number" id="CLOCK_RATE" name="CLOCK_RATE" min="1" required>
-                        </div>
-                    </div>
-
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="SECTION_LENGTH">Section Length</label>
-                            <input type="number" id="SECTION_LENGTH" name="SECTION_LENGTH" min="1" required>
-                        </div>
-                        <div class="form-group">
-                            <label for="SECTION_COUNT">Section Count</label>
-                            <input type="number" id="SECTION_COUNT" name="SECTION_COUNT" min="0" required>
-                        </div>
-                        <div class="form-group">
-                            <label for="QUEUE_MAXSIZE">Queue Max Size</label>
-                            <input type="number" id="QUEUE_MAXSIZE" name="QUEUE_MAXSIZE" min="1" required>
-                        </div>
-                    </div>
-
-                    <!-- Destination Selection -->
-                    <div class="section-divider-title">DATA OUTPUT DESTINATION</div>
-                    <div class="form-group">
-                        <label for="DESTINATION">Output Target</label>
-                        <select id="DESTINATION" name="DESTINATION" class="custom-select">
-                            <option value="postgresql">PostgreSQL / TimescaleDB (Relational / Time-Series)</option>
-                            <option value="influxdb">InfluxDB 2.x / Cloud (Time-Series Metric Storage)</option>
-                            <option value="mqtt">MQTT Broker (Publish Telemetry)</option>
-                        </select>
-                    </div>
-
-                    <!-- PostgreSQL Split Configuration Group -->
-                    <div id="postgres-config-group" class="target-config-card">
-                        <div class="card-title">POSTGRESQL / TIMESCALEDB SETTINGS</div>
+                    <section class="config-section" id="config-startup" aria-labelledby="config-startup-title">
+                        <div class="config-section-heading"><span class="config-section-number">01</span><div><h3 id="config-startup-title">Startup & automation</h3><p>Choose how acquisition starts when the service launches.</p></div></div>
                         <div class="form-row">
-                            <div class="form-group flex-2">
-                                <label for="DB_HOST">Host Address</label>
-                                <input type="text" id="DB_HOST" name="DB_HOST" placeholder="172.21.108.86 or localhost">
+                            <div class="form-group flex-2 checkbox-group">
+                                <input type="checkbox" id="AUTO_START_ON_STARTUP" name="AUTO_START_ON_STARTUP" class="custom-checkbox">
+                                <label for="AUTO_START_ON_STARTUP">Auto-start Ingestion Process on Application Startup</label>
                             </div>
                             <div class="form-group flex-1">
-                                <label for="DB_PORT">Port</label>
-                                <input type="number" id="DB_PORT" name="DB_PORT" placeholder="5432">
-                            </div>
-                        </div>
-                        <div class="form-row">
-                            <div class="form-group flex-1">
-                                <label for="DB_NAME">Database Name</label>
-                                <input type="text" id="DB_NAME" name="DB_NAME" placeholder="daq_db">
-                            </div>
-                            <div class="form-group flex-1">
-                                <label for="DB_TABLE">Table Name</label>
-                                <input type="text" id="DB_TABLE" name="DB_TABLE" placeholder="daq_telemetry">
-                            </div>
-                        </div>
-                        <div class="form-row">
-                            <div class="form-group flex-1">
-                                <label for="DB_USER">Username</label>
-                                <input type="text" id="DB_USER" name="DB_USER" placeholder="admin">
-                            </div>
-                            <div class="form-group flex-1">
-                                <label for="DB_PASSWORD">Password</label>
-                                <input type="password" id="DB_PASSWORD" name="DB_PASSWORD" placeholder="admin">
-                            </div>
-                        </div>
-                        <div class="form-group">
-                            <label for="DB_DSN">Generated Database DSN</label>
-                            <input type="text" id="DB_DSN" name="DB_DSN" placeholder="postgresql://admin:admin@172.21.108.86:5432/daq_db">
-                        </div>
-                    </div>
-
-                    <!-- InfluxDB Split Configuration Group -->
-                    <div id="influx-config-group" class="target-config-card" style="display: none;">
-                        <div class="card-title">INFLUXDB SETTINGS</div>
-                        <div class="form-row">
-                            <div class="form-group flex-2">
-                                <label for="INFLUX_URL">InfluxDB Server URL</label>
-                                <input type="text" id="INFLUX_URL" name="INFLUX_URL" placeholder="http://localhost:8086">
-                            </div>
-                            <div class="form-group flex-1">
-                                <label for="INFLUX_ORG">Organization (Org)</label>
-                                <input type="text" id="INFLUX_ORG" name="INFLUX_ORG" placeholder="mddp">
-                            </div>
-                        </div>
-                        <div class="form-row">
-                            <div class="form-group flex-1">
-                                <label for="INFLUX_BUCKET">Bucket Name</label>
-                                <input type="text" id="INFLUX_BUCKET" name="INFLUX_BUCKET" placeholder="daq_telemetry">
-                            </div>
-                            <div class="form-group flex-1">
-                                <label for="INFLUX_MEASUREMENT">Measurement Name</label>
-                                <input type="text" id="INFLUX_MEASUREMENT" name="INFLUX_MEASUREMENT" placeholder="daq_telemetry">
-                            </div>
-                        </div>
-                        <div class="form-row">
-                            <div class="form-group flex-2">
-                                <label for="INFLUX_TOKEN">API Authentication Token</label>
-                                <input type="password" id="INFLUX_TOKEN" name="INFLUX_TOKEN" placeholder="Token my-influxdb-token">
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- MQTT Configuration Group -->
-                    <div id="mqtt-config-group" class="target-config-card" style="display: none;">
-                        <div class="card-title">MQTT BROKER SETTINGS</div>
-                        <div class="form-row">
-                            <div class="form-group flex-2">
-                                <label for="MQTT_BROKER">MQTT Broker Host</label>
-                                <input type="text" id="MQTT_BROKER" name="MQTT_BROKER" placeholder="localhost">
-                            </div>
-                            <div class="form-group flex-1">
-                                <label for="MQTT_PORT">Port</label>
-                                <input type="number" id="MQTT_PORT" name="MQTT_PORT" placeholder="1883">
-                            </div>
-                        </div>
-                        <div class="form-row">
-                            <div class="form-group flex-2">
-                                <label for="MQTT_TOPIC">Telemetry Topic</label>
-                                <input type="text" id="MQTT_TOPIC" name="MQTT_TOPIC" placeholder="daq/telemetry">
-                            </div>
-                            <div class="form-group flex-1">
-                                <label for="MQTT_QOS">QoS Level</label>
-                                <select id="MQTT_QOS" name="MQTT_QOS" class="custom-select">
-                                    <option value="0">0 - At most once</option>
-                                    <option value="1">1 - At least once</option>
-                                    <option value="2">2 - Exactly once</option>
+                                <label for="AUTO_START_MODE">Startup Execution Mode</label>
+                                <select id="AUTO_START_MODE" name="AUTO_START_MODE">
+                                    <option value="mockup">Mockup Simulator (Synthetic Waveform)</option>
+                                    <option value="production">Physical DAQ (production)</option>
                                 </select>
                             </div>
                         </div>
+                    </section>
 
-                        <!-- MQTT Credentials & Security -->
-                        <div class="card-subtitle">BROKER AUTHENTICATION</div>
+                    <section class="config-section" id="config-hardware" aria-labelledby="config-hardware-title">
+                        <div class="config-section-heading"><span class="config-section-number">02</span><div><h3 id="config-hardware-title">Hardware & sampling</h3><p>Identify the DAQ device and set its channel and sampling limits.</p></div></div>
+                        <div class="config-subheading">Device connection</div>
+                        <div class="form-row">
+                            <div class="form-group flex-2 device-picker">
+                                <label for="DEVICE_DESCRIPTION">Device Description / Connection Port</label>
+                                <div class="scan-input-group">
+                                    <input type="text" id="DEVICE_DESCRIPTION" name="DEVICE_DESCRIPTION" required placeholder="e.g. USB-4716,BID#0">
+                                    <button type="button" id="btn-scan-usb" class="btn-scan-usb" title="Scan Host PC for USB & DAQ Ports">
+                                        <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round" class="scan-icon">
+                                            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+                                        </svg>
+                                        <span>SCAN USB</span>
+                                    </button>
+                                </div>
+                                <div id="scanned-devices-menu" class="scanned-devices-menu hidden"></div>
+                            </div>
+                            <div class="form-group flex-1">
+                                <label for="PROFILE_PATH">Profile Path</label>
+                                <input type="text" id="PROFILE_PATH" name="PROFILE_PATH">
+                            </div>
+                        </div>
+
                         <div class="form-row">
                             <div class="form-group">
-                                <label for="MQTT_USERNAME">Username</label>
-                                <input type="text" id="MQTT_USERNAME" name="MQTT_USERNAME" placeholder="Optional">
+                                <label for="DEVICE_ID">Device ID</label>
+                                <input type="text" id="DEVICE_ID" name="DEVICE_ID" required>
+                            </div>
+                        </div>
+
+                        <div class="config-subheading">Acquisition settings</div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="START_CHANNEL">Start Channel</label>
+                                <input type="number" id="START_CHANNEL" name="START_CHANNEL" min="0" max="7" required>
                             </div>
                             <div class="form-group">
-                                <label for="MQTT_PASSWORD">Password</label>
-                                <input type="password" id="MQTT_PASSWORD" name="MQTT_PASSWORD" placeholder="Optional">
+                                <label for="CHANNEL_COUNT">Channel Count</label>
+                                <input type="number" id="CHANNEL_COUNT" name="CHANNEL_COUNT" min="1" max="8" required>
                             </div>
-                        </div>
-
-                        <div class="form-group checkbox-group" style="padding-top: 0.5rem;">
-                            <input type="checkbox" id="MQTT_TLS_ENABLED" name="MQTT_TLS_ENABLED" class="custom-checkbox">
-                            <label for="MQTT_TLS_ENABLED">Enable TLS / SSL Encryption</label>
-                        </div>
-
-                        <div id="mqtt-tls-group" style="display: none; flex-direction: column; gap: 0.75rem; margin-top: 0.5rem;">
                             <div class="form-group">
-                                <label for="MQTT_CA_CERTS">CA Certificate Path</label>
-                                <input type="text" id="MQTT_CA_CERTS" name="MQTT_CA_CERTS" placeholder="/path/to/ca.crt">
-                            </div>
-                            <div class="form-row">
-                                <div class="form-group">
-                                    <label for="MQTT_CLIENT_CERT">Client Certificate Path</label>
-                                    <input type="text" id="MQTT_CLIENT_CERT" name="MQTT_CLIENT_CERT" placeholder="Optional">
-                                </div>
-                                <div class="form-group">
-                                    <label for="MQTT_CLIENT_KEY">Client Key Path</label>
-                                    <input type="text" id="MQTT_CLIENT_KEY" name="MQTT_CLIENT_KEY" placeholder="Optional">
-                                </div>
+                                <label for="CLOCK_RATE">Clock Rate (Hz)</label>
+                                <input type="number" id="CLOCK_RATE" name="CLOCK_RATE" min="1" required>
                             </div>
                         </div>
-                    </div>
 
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="DB_PAGE_SIZE">DB Insert Page Size</label>
-                            <input type="number" id="DB_PAGE_SIZE" name="DB_PAGE_SIZE" min="1" required>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="SECTION_LENGTH">Section Length</label>
+                                <input type="number" id="SECTION_LENGTH" name="SECTION_LENGTH" min="1" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="SECTION_COUNT">Section Count</label>
+                                <input type="number" id="SECTION_COUNT" name="SECTION_COUNT" min="0" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="QUEUE_MAXSIZE">Queue Max Size</label>
+                                <input type="number" id="QUEUE_MAXSIZE" name="QUEUE_MAXSIZE" min="1" required>
+                            </div>
                         </div>
-                        <div class="form-group">
-                            <label for="STATS_INTERVAL_SEC">Stats Log Interval (s)</label>
-                            <input type="number" id="STATS_INTERVAL_SEC" name="STATS_INTERVAL_SEC" min="1" required>
-                        </div>
-                        <div class="form-group">
-                            <label for="ANCHOR_RECALIBRATE_INTERVAL_HR">Anchor Recalibrate (hr)</label>
-                            <input type="number" id="ANCHOR_RECALIBRATE_INTERVAL_HR" name="ANCHOR_RECALIBRATE_INTERVAL_HR" min="0" step="any" required>
-                        </div>
-                    </div>
+                    </section>
 
-                    <!-- Linear Sensor Scaling -->
-                    <div class="section-divider-title">LINEAR SENSOR SCALING</div>
-                    <div class="form-row">
-                        <div class="form-group flex-2">
-                            <label for="SCALE_CHANNEL_TARGET">Target Channel</label>
-                            <select id="SCALE_CHANNEL_TARGET" class="custom-select">
-                                <option value="0">Channel 0</option>
-                                <option value="1">Channel 1</option>
-                                <option value="2">Channel 2</option>
-                                <option value="3">Channel 3</option>
-                                <option value="4">Channel 4</option>
-                                <option value="5">Channel 5</option>
-                                <option value="6">Channel 6</option>
-                                <option value="7">Channel 7</option>
+                    <section class="config-section" id="config-output" aria-labelledby="config-output-title">
+                        <div class="config-section-heading"><span class="config-section-number">03</span><div><h3 id="config-output-title">Data output</h3><p>Select a destination and configure its connection.</p></div></div>
+                        <div class="form-group">
+                            <label for="DESTINATION">Output Target</label>
+                            <select id="DESTINATION" name="DESTINATION">
+                                <option value="postgresql">PostgreSQL / TimescaleDB (Relational / Time-Series)</option>
+                                <option value="influxdb">InfluxDB 2.x / Cloud (Time-Series Metric Storage)</option>
+                                <option value="mqtt">MQTT Broker (Publish Telemetry)</option>
                             </select>
                         </div>
-                        <div class="form-group flex-1 checkbox-group">
-                            <input type="checkbox" id="CHANNEL_ENABLED" class="custom-checkbox">
-                            <label for="CHANNEL_ENABLED">Enable Channel</label>
+
+                        <div id="postgres-config-group" class="target-config-card">
+                            <div class="card-title">POSTGRESQL / TIMESCALEDB SETTINGS</div>
+                            <div class="form-row">
+                                <div class="form-group flex-2">
+                                    <label for="DB_HOST">Host Address</label>
+                                    <input type="text" id="DB_HOST" name="DB_HOST" placeholder="172.21.108.86 or localhost">
+                                </div>
+                                <div class="form-group flex-1">
+                                    <label for="DB_PORT">Port</label>
+                                    <input type="number" id="DB_PORT" name="DB_PORT" placeholder="5432">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group flex-1">
+                                    <label for="DB_NAME">Database Name</label>
+                                    <input type="text" id="DB_NAME" name="DB_NAME" placeholder="daq_db">
+                                </div>
+                                <div class="form-group flex-1">
+                                    <label for="DB_TABLE">Table Name</label>
+                                    <input type="text" id="DB_TABLE" name="DB_TABLE" placeholder="daq_telemetry">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group flex-1">
+                                    <label for="DB_USER">Username</label>
+                                    <input type="text" id="DB_USER" name="DB_USER" placeholder="admin">
+                                </div>
+                                <div class="form-group flex-1">
+                                    <label for="DB_PASSWORD">Password</label>
+                                    <input type="password" id="DB_PASSWORD" name="DB_PASSWORD" placeholder="admin">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="DB_DSN">Generated Database DSN</label>
+                                <input type="text" id="DB_DSN" name="DB_DSN" placeholder="postgresql://admin:admin@172.21.108.86:5432/daq_db">
+                            </div>
                         </div>
-                    </div>
 
-                    <div class="form-row">
-                        <div class="form-group"><label for="CHANNEL_LABEL">Sensor name</label><input id="CHANNEL_LABEL" type="text"></div>
-                        <div class="form-group"><label for="CHANNEL_UNIT">Physical unit</label><input id="CHANNEL_UNIT" type="text"></div>
-                        <div class="form-group"><label for="SCALE_REVISION">Calibration revision</label><input id="SCALE_REVISION" type="text"></div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group"><label for="CHANNEL_SIGNAL_TYPE">Signal type</label><select id="CHANNEL_SIGNAL_TYPE"><option value="SingleEnded">Single ended</option><option value="Differential">Differential</option><option value="PseudoDifferential">Pseudo differential</option></select></div>
-                        <div class="form-group"><label for="CHANNEL_VALUE_RANGE">Voltage range</label><select id="CHANNEL_VALUE_RANGE"><option value="V_0To5">0–5 V</option><option value="V_Neg5To5">±5 V</option><option value="V_0To10">0–10 V</option><option value="V_Neg10To10">±10 V</option></select></div>
-                        <div class="form-group checkbox-group"><input type="checkbox" id="SCALE_ENABLED" class="custom-checkbox"><label for="SCALE_ENABLED">Enable calibration</label></div>
-                    </div>
+                        <div id="influx-config-group" class="target-config-card">
+                            <div class="card-title">INFLUXDB SETTINGS</div>
+                            <div class="form-row">
+                                <div class="form-group flex-2">
+                                    <label for="INFLUX_URL">InfluxDB Server URL</label>
+                                    <input type="text" id="INFLUX_URL" name="INFLUX_URL" placeholder="http://localhost:8086">
+                                </div>
+                                <div class="form-group flex-1">
+                                    <label for="INFLUX_ORG">Organization (Org)</label>
+                                    <input type="text" id="INFLUX_ORG" name="INFLUX_ORG" placeholder="mddp">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group flex-1">
+                                    <label for="INFLUX_BUCKET">Bucket Name</label>
+                                    <input type="text" id="INFLUX_BUCKET" name="INFLUX_BUCKET" placeholder="daq_telemetry">
+                                </div>
+                                <div class="form-group flex-1">
+                                    <label for="INFLUX_MEASUREMENT">Measurement Name</label>
+                                    <input type="text" id="INFLUX_MEASUREMENT" name="INFLUX_MEASUREMENT" placeholder="daq_telemetry">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group flex-2">
+                                    <label for="INFLUX_TOKEN">API Authentication Token</label>
+                                    <input type="password" id="INFLUX_TOKEN" name="INFLUX_TOKEN" placeholder="Token my-influxdb-token">
+                                </div>
+                            </div>
+                        </div>
 
-                    <div id="scaling-fields-group">
+                        <div id="mqtt-config-group" class="target-config-card">
+                            <div class="card-title">MQTT BROKER SETTINGS</div>
+                            <div class="form-row">
+                                <div class="form-group flex-2">
+                                    <label for="MQTT_BROKER">MQTT Broker Host</label>
+                                    <input type="text" id="MQTT_BROKER" name="MQTT_BROKER" placeholder="localhost">
+                                </div>
+                                <div class="form-group flex-1">
+                                    <label for="MQTT_PORT">Port</label>
+                                    <input type="number" id="MQTT_PORT" name="MQTT_PORT" placeholder="1883">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group flex-2">
+                                    <label for="MQTT_TOPIC">Telemetry Topic</label>
+                                    <input type="text" id="MQTT_TOPIC" name="MQTT_TOPIC" placeholder="daq/telemetry">
+                                </div>
+                                <div class="form-group flex-1">
+                                    <label for="MQTT_QOS">QoS Level</label>
+                                    <select id="MQTT_QOS" name="MQTT_QOS">
+                                        <option value="0">0 - At most once</option>
+                                        <option value="1">1 - At least once</option>
+                                        <option value="2">2 - Exactly once</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="card-subtitle">BROKER AUTHENTICATION</div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="MQTT_USERNAME">Username</label>
+                                    <input type="text" id="MQTT_USERNAME" name="MQTT_USERNAME" placeholder="Optional">
+                                </div>
+                                <div class="form-group">
+                                    <label for="MQTT_PASSWORD">Password</label>
+                                    <input type="password" id="MQTT_PASSWORD" name="MQTT_PASSWORD" placeholder="Optional">
+                                </div>
+                            </div>
+
+                            <div class="form-group checkbox-group tls-toggle">
+                                <input type="checkbox" id="MQTT_TLS_ENABLED" name="MQTT_TLS_ENABLED" class="custom-checkbox">
+                                <label for="MQTT_TLS_ENABLED">Enable TLS / SSL Encryption</label>
+                            </div>
+
+                            <div id="mqtt-tls-group">
+                                <div class="form-group">
+                                    <label for="MQTT_CA_CERTS">CA Certificate Path</label>
+                                    <input type="text" id="MQTT_CA_CERTS" name="MQTT_CA_CERTS" placeholder="/path/to/ca.crt">
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="MQTT_CLIENT_CERT">Client Certificate Path</label>
+                                        <input type="text" id="MQTT_CLIENT_CERT" name="MQTT_CLIENT_CERT" placeholder="Optional">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="MQTT_CLIENT_KEY">Client Key Path</label>
+                                        <input type="text" id="MQTT_CLIENT_KEY" name="MQTT_CLIENT_KEY" placeholder="Optional">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="config-subheading">Storage & pipeline tuning</div>
                         <div class="form-row">
                             <div class="form-group">
-                                <label for="SCALE_LOW_VOLTAGE">Low Voltage (V)</label>
-                                <input type="number" id="SCALE_LOW_VOLTAGE" step="any">
+                                <label for="DB_RETENTION_DAYS">Raw retention (days)</label>
+                                <input type="number" id="DB_RETENTION_DAYS" name="DB_RETENTION_DAYS" min="1" required>
                             </div>
                             <div class="form-group">
-                                <label for="SCALE_HIGH_VOLTAGE">High Voltage (V)</label>
-                                <input type="number" id="SCALE_HIGH_VOLTAGE" step="any">
+                                <label for="DB_PAGE_SIZE">DB Insert Page Size</label>
+                                <input type="number" id="DB_PAGE_SIZE" name="DB_PAGE_SIZE" min="1" required>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="STATS_INTERVAL_SEC">Stats Log Interval (s)</label>
+                                <input type="number" id="STATS_INTERVAL_SEC" name="STATS_INTERVAL_SEC" min="1" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="ANCHOR_RECALIBRATE_INTERVAL_HR">Anchor Recalibrate (hr)</label>
+                                <input type="number" id="ANCHOR_RECALIBRATE_INTERVAL_HR" name="ANCHOR_RECALIBRATE_INTERVAL_HR" min="0" step="any" required>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="config-section" id="config-sensors" aria-labelledby="config-sensors-title">
+                        <div class="config-section-heading"><span class="config-section-number">04</span><div><h3 id="config-sensors-title">Sensor channels</h3><p>Select a channel to set its name, signal range, and calibration.</p></div></div>
+                        <div class="form-row">
+                            <div class="form-group flex-2">
+                                <label for="SCALE_CHANNEL_TARGET">Target Channel</label>
+                                <select id="SCALE_CHANNEL_TARGET">
+                                    <option value="0">Channel 0</option>
+                                    <option value="1">Channel 1</option>
+                                    <option value="2">Channel 2</option>
+                                    <option value="3">Channel 3</option>
+                                    <option value="4">Channel 4</option>
+                                    <option value="5">Channel 5</option>
+                                    <option value="6">Channel 6</option>
+                                    <option value="7">Channel 7</option>
+                                </select>
+                            </div>
+                            <div class="form-group flex-1 checkbox-group">
+                                <input type="checkbox" id="CHANNEL_ENABLED" class="custom-checkbox">
+                                <label for="CHANNEL_ENABLED">Enable Channel</label>
                             </div>
                         </div>
 
                         <div class="form-row">
-                            <div class="form-group">
-                                <label for="SCALE_LOW_VALUE">Low Value (Scaled Unit)</label>
-                                <input type="number" id="SCALE_LOW_VALUE" step="any">
+                            <div class="form-group"><label for="CHANNEL_LABEL">Sensor name</label><input id="CHANNEL_LABEL" type="text"></div>
+                            <div class="form-group"><label for="CHANNEL_UNIT">Physical unit</label><input id="CHANNEL_UNIT" type="text"></div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group"><label for="CHANNEL_SIGNAL_TYPE">Signal type</label><select id="CHANNEL_SIGNAL_TYPE"><option value="SingleEnded">Single ended</option><option value="Differential">Differential</option><option value="PseudoDifferential">Pseudo differential</option></select></div>
+                            <div class="form-group"><label for="CHANNEL_VALUE_RANGE">Voltage range</label><select id="CHANNEL_VALUE_RANGE"><option value="V_0To5">0–5 V</option><option value="V_Neg5To5">±5 V</option><option value="V_0To10">0–10 V</option><option value="V_Neg10To10">±10 V</option></select></div>
+                        </div>
+
+                        <div class="config-subheading">Linear calibration</div>
+                        <div class="form-row">
+                            <div class="form-group checkbox-group"><input type="checkbox" id="SCALE_ENABLED" class="custom-checkbox"><label for="SCALE_ENABLED">Enable calibration</label></div>
+                            <div class="form-group"><label for="SCALE_REVISION">Calibration revision</label><input id="SCALE_REVISION" type="text"></div>
+                        </div>
+                        <div id="scaling-fields-group">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="SCALE_LOW_VOLTAGE">Low Voltage (V)</label>
+                                    <input type="number" id="SCALE_LOW_VOLTAGE" step="any">
+                                </div>
+                                <div class="form-group">
+                                    <label for="SCALE_HIGH_VOLTAGE">High Voltage (V)</label>
+                                    <input type="number" id="SCALE_HIGH_VOLTAGE" step="any">
+                                </div>
                             </div>
-                            <div class="form-group">
-                                <label for="SCALE_HIGH_VALUE">High Value (Scaled Unit)</label>
-                                <input type="number" id="SCALE_HIGH_VALUE" step="any">
+
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="SCALE_LOW_VALUE">Low Value (Scaled Unit)</label>
+                                    <input type="number" id="SCALE_LOW_VALUE" step="any">
+                                </div>
+                                <div class="form-group">
+                                    <label for="SCALE_HIGH_VALUE">High Value (Scaled Unit)</label>
+                                    <input type="number" id="SCALE_HIGH_VALUE" step="any">
+                                </div>
                             </div>
                         </div>
-                    </div>
+                    </section>
 
                     <button type="submit" class="save-btn">
                         <span>SAVE CONFIGURATION</span>
@@ -381,12 +388,11 @@
                 </form>
             </section>
 
-            <!-- Right Side: Process Runner Controls & Console logs -->
             <section class="console-panel">
                 <div class="panel-header flex-header">
                     <div>
-                        <h2>PROCESS MANAGEMENT</h2>
-                        <span class="panel-subtitle">Start, stop, and audit pipeline tasks</span>
+                        <h2>Process management</h2>
+                        <span class="panel-subtitle">Run acquisition and monitor pipeline activity</span>
                     </div>
                     <div class="mode-select-wrap">
                         <label for="mode-select">Execution Mode</label>
@@ -411,7 +417,7 @@
                         <span>STOP PROCESS</span>
                     </button>
                 </div>
-                <div id="production-health" class="target-config-card" role="status" aria-live="polite">
+                <div class="target-config-card" role="status" aria-live="polite">
                     <div class="card-title">PRODUCTION HEALTH</div>
                     <div id="production-health-summary">Waiting for acquisition status…</div>
                     <div id="production-health-buffer"></div>
@@ -421,19 +427,17 @@
                 <div class="target-config-card">
                     <div class="card-title">PRODUCTION MEASUREMENTS · LAST 2 MINUTES</div>
                     <label for="graph-channel">Channel</label>
-                    <select id="graph-channel" class="custom-select"></select>
+                    <select id="graph-channel"></select>
                     <div id="sample-graph-message">Loading physical DAQ samples…</div>
                     <label for="raw-sample-graph">Raw voltage (V)</label>
-                    <canvas id="raw-sample-graph" width="520" height="130" style="width:100%;height:130px"></canvas>
+                    <canvas id="raw-sample-graph" width="520" height="130"></canvas>
                     <label id="calibrated-graph-label" for="calibrated-sample-graph">Calibrated measurement</label>
-                    <canvas id="calibrated-sample-graph" width="520" height="130" style="width:100%;height:130px"></canvas>
+                    <canvas id="calibrated-sample-graph" width="520" height="130"></canvas>
                 </div>
 
                 <div class="terminal-wrapper">
                     <div class="terminal-header">
-                        <div class="term-tabs">
-                            <span class="term-tab active">STDOUT LOG CONSOLE</span>
-                        </div>
+                        <span class="term-tab">STDOUT LOG CONSOLE</span>
                         <button id="clear-console-btn" class="clear-btn">CLEAR</button>
                     </div>
                     <div class="terminal-body monospace" id="console-output">
@@ -444,10 +448,7 @@
         </div>
     </div>
 
-    <!-- Notification Toast Element -->
-    <div id="toast" class="toast">
-        <span id="toast-message">Configuration saved successfully.</span>
-    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
     <script src="/static/app.js"></script>
 </body>

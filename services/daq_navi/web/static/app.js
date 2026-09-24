@@ -1,34 +1,26 @@
-// app.js
-// See: docs/architecture/context.md
-// English comments only
-
 let socket = null;
 if (typeof io !== 'undefined') {
     socket = io();
 } else {
     console.warn('Socket.IO library not loaded; realtime updates disabled.');
 }
-let isSystemRunning = false;
 let channelConfigs = {};
 let currentScaleChannel = '0';
 
 document.addEventListener('DOMContentLoaded', () => {
-    // Start clock thread
     updateClock();
     setInterval(updateClock, 1000);
 
-    // Initial API loads
     loadConfig();
     checkProcessStatus();
     refreshRetentionPolicy();
     setInterval(checkProcessStatus, 4000);
     resolveBackLink();
 
-    // Setup form submit handlers
     const form = document.getElementById('config-form');
     form.addEventListener('submit', handleConfigSave);
+    setupConfigNavigation();
 
-    // Setup scaling toggle, destination toggle, and target channel listeners
     document.getElementById('SCALE_ENABLED').addEventListener('change', toggleScalingFields);
     document.getElementById('SCALE_CHANNEL_TARGET').addEventListener('change', handleScaleChannelTargetChange);
     document.getElementById('graph-channel').addEventListener('change', refreshProductionGraphs);
@@ -40,8 +32,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (tlsEl) {
         tlsEl.addEventListener('change', toggleTlsFields);
     }
+    ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD', 'DB_NAME'].forEach(id => {
+        document.getElementById(id).addEventListener('input', syncPostgresDsn);
+    });
 
-    // Setup action buttons
     document.getElementById('start-btn').addEventListener('click', handleStartProcess);
     document.getElementById('stop-btn').addEventListener('click', handleStopProcess);
     document.getElementById('clear-console-btn').addEventListener('click', clearConsole);
@@ -51,7 +45,6 @@ document.addEventListener('DOMContentLoaded', () => {
         scanBtn.addEventListener('click', handleScanUsbDevices);
     }
 
-    // Close scanned devices dropdown when clicking outside
     document.addEventListener('click', (e) => {
         const menu = document.getElementById('scanned-devices-menu');
         const scanBtn = document.getElementById('btn-scan-usb');
@@ -62,21 +55,45 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Bind Socket.IO event listeners
     bindSocketEvents();
 
     refreshProductionGraphs();
     setInterval(refreshProductionGraphs, 10000);
 });
 
-// Scan Host PC USB / DAQ Hardware
+function setupConfigNavigation() {
+    const links = [...document.querySelectorAll('.config-nav a[href^="#config-"]')];
+    const sections = links.map(link => document.querySelector(link.getAttribute('href')));
+    if (!links.length || sections.some(section => !section)) return;
+
+    const setActive = activeIndex => {
+        links.forEach((link, index) => {
+            if (index === activeIndex) link.setAttribute('aria-current', 'location');
+            else link.removeAttribute('aria-current');
+        });
+    };
+    const updateActive = () => {
+        let activeIndex = 0;
+        sections.forEach((section, index) => {
+            if (section.getBoundingClientRect().top <= 110) activeIndex = index;
+        });
+        setActive(activeIndex);
+    };
+    links.forEach((link, index) => link.addEventListener('click', () => setActive(index)));
+    window.addEventListener('scroll', updateActive, {passive: true});
+    updateActive();
+}
+
 async function handleScanUsbDevices() {
     const scanBtn = document.getElementById('btn-scan-usb');
     const menu = document.getElementById('scanned-devices-menu');
     if (!scanBtn || !menu) return;
 
     scanBtn.classList.add('scanning');
-    menu.innerHTML = '<div class="scan-loading"><span class="spinner"></span> Scanning Host PC USB Bus & DAQ Ports...</div>';
+    const loading = document.createElement('div');
+    loading.className = 'scan-loading';
+    loading.textContent = 'Scanning host USB bus and DAQ ports…';
+    menu.replaceChildren(loading);
     menu.classList.remove('hidden');
 
     try {
@@ -84,28 +101,35 @@ async function handleScanUsbDevices() {
         const data = await response.json();
 
         if (data.status === 'success' && data.devices && data.devices.length > 0) {
-            menu.innerHTML = '';
-            
+            menu.replaceChildren();
             const header = document.createElement('div');
             header.className = 'scan-menu-header';
-            header.innerHTML = `<span>DETECTED HARDWARE PORTS (${data.devices.length})</span><button type="button" class="close-scan-btn">&times;</button>`;
+            const count = document.createElement('span');
+            count.textContent = `Detected hardware ports (${data.devices.length})`;
+            const close = document.createElement('button');
+            close.type = 'button';
+            close.className = 'close-scan-btn';
+            close.setAttribute('aria-label', 'Close detected hardware ports');
+            close.textContent = '×';
+            header.append(count, close);
             menu.appendChild(header);
 
+            const span = (className, value) => {
+                const element = document.createElement('span');
+                element.className = className;
+                element.textContent = value ?? '';
+                return element;
+            };
             data.devices.forEach(dev => {
-                const item = document.createElement('div');
+                const item = document.createElement('button');
+                item.type = 'button';
                 item.className = 'scan-item';
                 const badgeClass = dev.is_daq ? 'badge-daq' : 'badge-serial';
-                
-                item.innerHTML = `
-                    <div class="scan-item-main">
-                        <span class="scan-item-name">${dev.name}</span>
-                        <span class="scan-item-id monospace">${dev.id}</span>
-                    </div>
-                    <div class="scan-item-meta">
-                        <span class="badge ${badgeClass}">${dev.type}</span>
-                        <span class="scan-item-port text-muted">${dev.port}</span>
-                    </div>
-                `;
+                const main = span('scan-item-main', '');
+                main.append(span('scan-item-name', dev.name), span('scan-item-id monospace', dev.id));
+                const meta = span('scan-item-meta', '');
+                meta.append(span(`badge ${badgeClass}`, dev.type), span('text-muted', dev.port));
+                item.append(main, meta);
 
                 item.addEventListener('click', () => {
                     const devInput = document.getElementById('DEVICE_DESCRIPTION');
@@ -113,6 +137,7 @@ async function handleScanUsbDevices() {
                         devInput.value = dev.id;
                         devInput.classList.add('highlight-flash');
                         setTimeout(() => devInput.classList.remove('highlight-flash'), 1200);
+                        devInput.focus();
                     }
                     menu.classList.add('hidden');
                     showToast(`Selected device: ${dev.id}`);
@@ -121,15 +146,22 @@ async function handleScanUsbDevices() {
                 menu.appendChild(item);
             });
 
-            header.querySelector('.close-scan-btn').addEventListener('click', () => {
+            close.addEventListener('click', () => {
                 menu.classList.add('hidden');
+                scanBtn.focus();
             });
         } else {
-            menu.innerHTML = '<div class="scan-empty">No USB/DAQ devices detected on host PC.</div>';
+            const empty = document.createElement('div');
+            empty.className = 'scan-empty';
+            empty.textContent = 'No USB/DAQ devices detected on host PC.';
+            menu.replaceChildren(empty);
         }
     } catch (err) {
         console.error('Error scanning USB devices:', err);
-        menu.innerHTML = `<div class="scan-error">Failed to scan USB ports: ${err.message}</div>`;
+        const error = document.createElement('div');
+        error.className = 'scan-error';
+        error.textContent = `Failed to scan USB ports: ${err.message}`;
+        menu.replaceChildren(error);
     } finally {
         scanBtn.classList.remove('scanning');
     }
@@ -192,7 +224,6 @@ function drawProductionGraph(canvasId, points, gaps, field) {
     ctx.stroke();
 }
 
-// Toggle visibility of Destination settings (shows ONLY selected destination)
 function toggleDestinationFields() {
     const dest = document.getElementById('DESTINATION')?.value || 'postgresql';
     const postgresGroup = document.getElementById('postgres-config-group');
@@ -216,7 +247,6 @@ function toggleDestinationFields() {
     }
 }
 
-// Auto-generate DSN from split PostgreSQL fields
 function syncPostgresDsn() {
     const host = document.getElementById('DB_HOST')?.value.trim() || 'localhost';
     const port = document.getElementById('DB_PORT')?.value.trim() || '5432';
@@ -227,14 +257,6 @@ function syncPostgresDsn() {
     if (dsnEl) dsnEl.value = `postgresql://${user}:${pass}@${host}:${port}/${name}`;
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-    ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD', 'DB_NAME'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.addEventListener('input', syncPostgresDsn);
-    });
-});
-
-// Toggle visibility of TLS certificate fields
 function toggleTlsFields() {
     const tlsChecked = document.getElementById('MQTT_TLS_ENABLED')?.checked || false;
     const tlsGroup = document.getElementById('mqtt-tls-group');
@@ -243,7 +265,6 @@ function toggleTlsFields() {
     }
 }
 
-// Update Header UTC Clock Display
 function updateClock() {
     const clockEl = document.getElementById('realtime-clock');
     if (!clockEl) return;
@@ -254,17 +275,15 @@ function updateClock() {
     clockEl.textContent = `${hours}:${minutes}:${seconds}`;
 }
 
-// Fetch and load configuration into form fields
 async function loadConfig() {
     try {
         const res = await fetch('/api/config');
         if (!res.ok) throw new Error("Failed to load config.");
         const config = await res.json();
         
-        // Populate standard inputs
         Object.keys(config).forEach(key => {
             const input = document.getElementById(key);
-            if (input && key !== 'SCALE_CONFIGS') {
+            if (input) {
                 if (input.type === 'checkbox') {
                     input.checked = config[key];
                 } else {
@@ -294,7 +313,6 @@ async function loadConfig() {
     }
 }
 
-// Check if a process is already running on page load
 async function checkProcessStatus() {
     try {
         const res = await fetch('/api/status');
@@ -347,10 +365,7 @@ async function refreshRetentionPolicy() {
     }
 }
 
-// Update Start/Stop buttons and indicator dots
 function updateUIState(running, mode = 'mockup', destination = 'database', status = null) {
-    isSystemRunning = running;
-    
     const startBtn = document.getElementById('start-btn');
     const stopBtn = document.getElementById('stop-btn');
     const modeSelect = document.getElementById('mode-select');
@@ -397,19 +412,16 @@ function updateUIState(running, mode = 'mockup', destination = 'database', statu
     }
 }
 
-// Intercept form submissions and update JSON configuration on the server
 async function handleConfigSave(e) {
     e.preventDefault();
     
-    // Save current active scaling inputs first
     saveInputsToScaleChannel(currentScaleChannel);
     
     const configData = {};
     const elements = e.target.elements;
     
-    // Parse form fields manually to support checkboxes, integers, and custom keys
     for (let el of elements) {
-        if (!el.name) continue; // Excludes channel-specific scaling inputs without name attrs
+        if (!el.name) continue;
         
         if (el.type === 'checkbox') {
             configData[el.name] = el.checked;
@@ -444,7 +456,6 @@ async function handleConfigSave(e) {
     }
 }
 
-// Handle Run command
 async function handleStartProcess() {
     const mode = document.getElementById('mode-select').value;
     const response = await fetch('/api/start', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode})});
@@ -453,7 +464,6 @@ async function handleStartProcess() {
     await checkProcessStatus();
 }
 
-// Handle Stop command
 async function handleStopProcess() {
     const response = await fetch('/api/stop', {method: 'POST'});
     const result = await response.json();
@@ -461,15 +471,16 @@ async function handleStopProcess() {
     await checkProcessStatus();
 }
 
-// Clear terminal logs
 function clearConsole() {
     const consoleBody = document.getElementById('console-output');
     if (consoleBody) {
-        consoleBody.innerHTML = '<div class="log-line text-muted">[CONSOLE] Logs cleared.</div>';
+        const line = document.createElement('div');
+        line.className = 'log-line text-muted';
+        line.textContent = '[CONSOLE] Logs cleared.';
+        consoleBody.replaceChildren(line);
     }
 }
 
-// Append log message directly inside console body
 function appendLog(level, message) {
     const consoleBody = document.getElementById('console-output');
     if (!consoleBody) return;
@@ -484,32 +495,30 @@ function appendLog(level, message) {
     if (level === 'SUCCESS') tagClass = 'text-success';
     if (level === 'ERROR' || level === 'WARN') tagClass = 'text-error';
     
-    logLine.innerHTML = `<span class="log-time">${timeStr}</span> <span class="${tagClass}">${message}</span>`;
+    const time = document.createElement('span');
+    time.className = 'log-time';
+    time.textContent = timeStr;
+    const body = document.createElement('span');
+    body.className = tagClass;
+    body.textContent = message;
+    logLine.append(time, body);
     consoleBody.appendChild(logLine);
     
-    // Auto-scroll
     consoleBody.scrollTop = consoleBody.scrollHeight;
 }
 
-// Display simple alert toaster
 function showToast(message, isError = false) {
     const toast = document.getElementById('toast');
     if (!toast) return;
     toast.textContent = message;
     
-    if (isError) {
-        toast.style.borderColor = '#ef4444';
-    } else {
-        toast.style.borderColor = '#0ea5e9';
-    }
-    
+    toast.classList.toggle('error', isError);
     toast.classList.add('show');
     setTimeout(() => {
         toast.classList.remove('show');
     }, 3000);
 }
 
-// Setup WebSocket triggers
 function bindSocketEvents() {
     if (!socket) {
         return;
@@ -523,18 +532,16 @@ function bindSocketEvents() {
         updateUIState(false);
     });
 
-    // Update status elements
     socket.on('status_change', (data) => {
         updateUIState(data.is_running, data.mode, data.destination);
     });
 
-    // Handle new log streams
     socket.on('log_update', (data) => {
         const line = data.log;
         let level = 'INFO';
         if (line.includes('error') || line.includes('Error') || line.includes('failed') || line.includes('Full!')) {
             level = 'ERROR';
-        } else if (line.includes('started') || line.includes('connected') || line.includes('ready') || line.includes('ready')) {
+        } else if (line.includes('started') || line.includes('connected') || line.includes('ready')) {
             level = 'SUCCESS';
         }
         appendLog(level, line);
@@ -542,7 +549,6 @@ function bindSocketEvents() {
 
 }
 
-// Enable/Disable scaling sub-inputs based on toggle checkbox
 function toggleScalingFields() {
     const isEnabled = document.getElementById('SCALE_ENABLED').checked;
     const fields = ['SCALE_LOW_VOLTAGE', 'SCALE_HIGH_VOLTAGE', 'SCALE_LOW_VALUE', 'SCALE_HIGH_VALUE'];
@@ -550,12 +556,11 @@ function toggleScalingFields() {
         const el = document.getElementById(id);
         if (el) {
             el.disabled = !isEnabled;
-            el.required = isEnabled; // Require input values if enabled
+            el.required = isEnabled;
         }
     });
 }
 
-// Load calibration data from config object to input fields
 function loadScaleChannelToInputs(ch) {
     const cfg = channelConfigs[ch] || {enabled: false, label: '', unit: '', signal_type: 'SingleEnded', value_range: 'V_0To5', scale: {enabled: false, low_voltage: 0, high_voltage: 5, low_value: 0, high_value: 100, revision: ''}};
     const scale = cfg.scale || {};
@@ -573,7 +578,6 @@ function loadScaleChannelToInputs(ch) {
     toggleScalingFields();
 }
 
-// Save inputs back to active channel configuration in memory
 function saveInputsToScaleChannel(ch) {
     const previous = channelConfigs[ch] || {};
     const number = id => Number(document.getElementById(id).value);
@@ -590,17 +594,12 @@ function saveInputsToScaleChannel(ch) {
     };
 }
 
-// Handle changes to target calibration channel selection
 function handleScaleChannelTargetChange(e) {
-    // 1. Save inputs of current channel
     saveInputsToScaleChannel(currentScaleChannel);
-    // 2. Change channel index pointer
     currentScaleChannel = e.target.value;
-    // 3. Load config of new channel into inputs
     loadScaleChannelToInputs(currentScaleChannel);
 }
 
-// Dynamically replace 'localhost' in back link with the accessing IP/hostname
 function resolveBackLink() {
     const backLink = document.querySelector('.back-link');
     if (backLink) {
