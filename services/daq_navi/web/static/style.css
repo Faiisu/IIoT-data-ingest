@@ -266,6 +266,12 @@ body::before {
     animation: telemetryPulse 1.8s infinite;
 }
 
+.pulse-dot.buffering {
+    background-color: var(--accent-amber);
+    box-shadow: 0 0 18px rgba(255, 183, 3, 0.4);
+    animation: telemetryPulse 1.8s infinite;
+}
+
 .pulse-dot.offline {
     background-color: var(--accent-red);
     box-shadow: var(--glow-red);

@@ -16,12 +16,21 @@ import threading
 import re
 import time
 import signal
+import tempfile
+import math
+from pathlib import Path
 from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO, emit
+
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+from daq_navi.core.config_loader import DaqNaviConfig
+from daq_navi.core.production_acquisition import (
+    TimescaleProductionDestination, validate_production_config,
+)
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -51,7 +60,6 @@ CORE_DIR = os.path.join(SERVICE_DIR, 'core')
 CONFIG_PATH = os.path.join(SERVICE_DIR, 'config.json')
 PID_PATH = os.path.join(SERVICE_DIR, '.daq_process.pid')
 MODE_PATH = os.path.join(SERVICE_DIR, '.daq_process.mode')
-DESIRED_STATE_PATH = os.path.join(SERVICE_DIR, '.daq_desired_state.json')
 LOG_PATH = os.path.join(SERVICE_DIR, 'daq_pipeline.log')
 
 # Global monitoring variables
@@ -69,32 +77,85 @@ def read_config():
         return {}
 
 def write_config(config_data):
-    """Writes configuration parameters to config.json."""
+    """Atomically replace the saved configuration."""
+    temporary = None
     try:
-        with open(CONFIG_PATH, 'w') as f:
+        config_data = {**config_data, '_WEB_MANAGED': True}
+        with tempfile.NamedTemporaryFile('w', dir=os.path.dirname(CONFIG_PATH),
+                                         encoding='utf-8', delete=False) as f:
+            temporary = f.name
             json.dump(config_data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.replace(temporary, CONFIG_PATH)
+        except OSError:
+            # When CONFIG_PATH is bind-mounted directly in Docker, os.replace can fail with EBUSY.
+            with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+                json.dump(config_data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
         return True
     except Exception as e:
         print(f"Error writing config.json: {e}")
         return False
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
 
-def read_desired_state():
-    """Reads persistent desired state metadata."""
-    try:
-        if os.path.exists(DESIRED_STATE_PATH):
-            with open(DESIRED_STATE_PATH, 'r') as f:
-                return json.load(f)
-    except Exception as e:
-        print(f"Error reading desired state: {e}")
-    return {"is_running": False, "mode": "mockup"}
 
-def write_desired_state(is_running, mode="mockup"):
-    """Writes persistent desired state metadata across system reboots."""
-    try:
-        with open(DESIRED_STATE_PATH, 'w') as f:
-            json.dump({"is_running": is_running, "mode": mode}, f, indent=2)
-    except Exception as e:
-        print(f"Error writing desired state: {e}")
+def merge_config(current, changes):
+    if not isinstance(changes, dict):
+        raise ValueError('Configuration must be an object')
+    merged = dict(current)
+    for key, value in changes.items():
+        if key == 'CHANNELS':
+            if not isinstance(value, dict):
+                raise ValueError('CHANNELS must be an object')
+            channels = {name: dict(channel) for name, channel in current.get('CHANNELS', {}).items()}
+            for name, update in value.items():
+                if not name.isdecimal() or not isinstance(update, dict):
+                    raise ValueError('Each channel must be an object with a numeric key')
+                channel = dict(channels.get(name, {}))
+                for field, field_value in update.items():
+                    if field == 'scale':
+                        if not isinstance(field_value, dict):
+                            raise ValueError(f'channel {name} scale must be an object')
+                        channel[field] = {**channel.get(field, {}), **field_value}
+                    else:
+                        channel[field] = field_value
+                channels[name] = channel
+            merged[key] = channels
+        elif key in current or key in ('AUTO_START_ON_STARTUP', 'AUTO_START_MODE', 'DB_RETENTION_DAYS'):
+            merged[key] = value
+        else:
+            raise ValueError(f'Unsupported setting: {key}')
+    for key in ('START_CHANNEL', 'CHANNEL_COUNT', 'CLOCK_RATE', 'SECTION_LENGTH',
+                'SECTION_COUNT', 'SPOOL_MAX_BYTES', 'DB_RETENTION_DAYS'):
+        if key in merged and type(merged[key]) is not int:
+            raise ValueError(f'{key} must be an integer')
+    if type(merged.get('AUTO_START_ON_STARTUP', False)) is not bool:
+        raise ValueError('AUTO_START_ON_STARTUP must be a boolean')
+    if merged.get('AUTO_START_MODE', 'production') not in ('production', 'mockup'):
+        raise ValueError('AUTO_START_MODE must be production or mockup')
+    if merged.get('DB_RETENTION_DAYS', 30) < 1:
+        raise ValueError('DB_RETENTION_DAYS must be at least one day')
+    if merged.get('CHANNEL_COUNT', 0) < 1 or merged.get('SECTION_LENGTH', 0) < 1:
+        raise ValueError('CHANNEL_COUNT and SECTION_LENGTH must be positive')
+    if not 1000 <= merged.get('CLOCK_RATE', 0) <= 2000:
+        raise ValueError('CLOCK_RATE must be 1000–2000 Hz per channel')
+    for name, channel in merged.get('CHANNELS', {}).items():
+        if type(channel.get('enabled')) is not bool:
+            raise ValueError(f'channel {name} enabled must be a boolean')
+        scale = channel.get('scale', {})
+        for field in ('low_voltage', 'high_voltage', 'low_value', 'high_value'):
+            if field in scale and (type(scale[field]) not in (int, float) or
+                                   not math.isfinite(scale[field])):
+                raise ValueError(f'channel {name} {field} must be a finite number')
+    cfg = DaqNaviConfig(merged, allow_env_overrides=False)
+    if merged.get('AUTO_START_MODE', 'production') == 'production':
+        validate_production_config(cfg)
+    return merged
 
 # Cross-platform utility to check if a process is still active on the host OS
 def is_pid_running(pid):
@@ -107,6 +168,9 @@ def is_pid_running(pid):
             return False
     else:
         try:
+            stat_path = f'/proc/{pid}/stat'
+            if os.path.exists(stat_path) and Path(stat_path).read_text().split(') ', 1)[1][0] == 'Z':
+                return False
             # Query signal 0 (null signal) on POSIX
             os.kill(pid, 0)
             return True
@@ -123,7 +187,11 @@ def get_running_process():
                 mode = f.read().strip()
             
             if is_pid_running(pid):
-                return pid, mode
+                command_path = f'/proc/{pid}/cmdline'
+                script = 'mockup_stream_to_db.py' if mode == 'mockup' else 'stream_to_db.py'
+                if sys.platform == 'win32' or (os.path.exists(command_path) and
+                    script.encode() in Path(command_path).read_bytes()):
+                    return pid, mode
         except Exception as e:
             print(f"Error checking active PID file: {e}")
     return None, None
@@ -138,16 +206,17 @@ def terminate_pid(pid):
     else:
         try:
             os.kill(pid, 15) # SIGTERM (graceful exit)
-            # Wait up to 3 seconds for exit, force kill if stuck
-            for _ in range(30):
+            # The production writer has a 10-second drain window and a 15-second join.
+            for _ in range(250):
                 if not is_pid_running(pid):
-                    return
+                    return True
                 time.sleep(0.1)
-            os.kill(pid, 9) # SIGKILL
+            return False
         except ProcessLookupError:
-            pass
+            return True
         except OSError as e:
             print(f"Error terminating Unix PID {pid}: {e}")
+            return False
 
 # Regex to extract statistics from the log file
 # E.g.: [STATS] polled=1,024 | written=1,024 | dropped_batches=0 (0.0%) | db_errors=0 | queue=0/200
@@ -188,13 +257,13 @@ def tail_log_file():
                 pid, _ = get_running_process()
                 if pid is None:
                     # DAQ process stopped; close tailing thread and notify client
-                    socketio.emit('status_change', {'is_running': False})
-                    if os.path.exists(PID_PATH):
-                        try: os.remove(PID_PATH)
-                        except: pass
-                    if os.path.exists(MODE_PATH):
-                        try: os.remove(MODE_PATH)
-                        except: pass
+                    cfg = read_config()
+                    try:
+                        rec_mode = Path(MODE_PATH).read_text(encoding='utf-8').strip()
+                    except OSError:
+                        rec_mode = None
+                    stopped_mode = rec_mode or cfg.get('AUTO_START_MODE', 'production')
+                    socketio.emit('status_change', {'is_running': False, 'mode': stopped_mode})
                     break
                     
                 line = f.readline()
@@ -313,10 +382,78 @@ def get_config():
 
 @app.route('/api/config', methods=['POST'])
 def save_config():
-    config_data = request.json
-    if write_config(config_data):
-        return jsonify({'status': 'success'})
-    return jsonify({'status': 'error', 'message': 'Failed to save configuration.'}), 500
+    try:
+        current = read_config()
+        payload = request.get_json(silent=True)
+        updated = merge_config(current, payload)
+    except (ValueError, TypeError, KeyError) as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    previous_retention = current.get('DB_RETENTION_DAYS')
+    if 'DB_RETENTION_DAYS' in updated and updated['DB_RETENTION_DAYS'] != previous_retention:
+        try:
+            TimescaleProductionDestination(DaqNaviConfig(updated, allow_env_overrides=False)).ensure_schema()
+        except Exception as exc:
+            return jsonify({'status': 'error', 'message': f'Could not apply retention policy: {exc}'}), 503
+    if not write_config(updated):
+        return jsonify({'status': 'error', 'message': 'Failed to save configuration.'}), 500
+    pid, mode = get_running_process()
+    if pid is not None:
+        stop_result = stop_acquisition(manual=False)
+        if not stop_result['stopped']:
+            return jsonify({'status': 'error', 'message': 'Saved; prior session is still stopping',
+                            'config': updated, **stop_result}), 503
+        target_mode = updated.get('AUTO_START_MODE') if ('AUTO_START_MODE' in (payload or {})) else (mode or updated.get('AUTO_START_MODE', 'production'))
+        start_result = start_acquisition(target_mode)
+        if not start_result['started']:
+            return jsonify({'status': 'error', 'message': 'Saved; restart failed',
+                            'config': updated, **start_result}), 503
+        drained = stop_result.get('drained', not stop_result.get('pending_replay', False))
+        pending_replay = stop_result.get('pending_replay', False)
+        pending_batches = stop_result.get('pending_batches', 0)
+        return jsonify({
+            'status': 'success',
+            'config': updated,
+            'retention_days': updated['DB_RETENTION_DAYS'],
+            'previous_session': {
+                'stopped': True,
+                'drained': drained,
+                'pending_replay': pending_replay,
+                'pending_batches': pending_batches,
+            },
+            'drained': drained,
+            'pending_replay': pending_replay,
+            'pending_batches': pending_batches,
+        })
+    runtime = read_runtime_status(updated)
+    pending = runtime.get('pending_batches', 0)
+    return jsonify({
+        'status': 'success',
+        'config': updated,
+        'retention_days': updated['DB_RETENTION_DAYS'],
+        'drained': pending == 0,
+        'pending_replay': pending > 0,
+        'pending_batches': pending,
+    })
+
+
+@app.route('/api/retention', methods=['GET'])
+def get_retention():
+    config = read_config()
+    try:
+        import psycopg2
+        with psycopg2.connect(config['DB_DSN'], connect_timeout=3) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""SELECT config->>'drop_after' FROM timescaledb_information.jobs
+                    WHERE hypertable_name=%s AND proc_name='policy_retention'""",
+                               (config['DB_PRODUCTION_TABLE'],))
+                row = cursor.fetchone()
+        if row is None:
+            return jsonify({'saved_days': config.get('DB_RETENTION_DAYS', 30),
+                            'message': 'No active production retention policy'}), 503
+        return jsonify({'saved_days': config.get('DB_RETENTION_DAYS', 30), 'effective': row[0]})
+    except Exception as exc:
+        return jsonify({'saved_days': config.get('DB_RETENTION_DAYS'),
+                        'message': f'Could not read retention policy: {exc}'}), 503
 
 @app.route('/api/test_db', methods=['POST'])
 def test_db():
@@ -369,18 +506,100 @@ def test_db():
 def get_status():
     pid, mode = get_running_process()
     is_running = pid is not None
-    mode_val = mode or 'mockup'
-    dest = read_config().get('DESTINATION', 'database')
-    return jsonify({
+    config = read_config()
+    try:
+        recorded_mode = Path(MODE_PATH).read_text(encoding='utf-8').strip()
+    except OSError:
+        recorded_mode = None
+    mode_val = mode or recorded_mode or config.get('AUTO_START_MODE', 'production')
+    dest = config.get('DESTINATION', 'postgresql')
+    runtime = read_runtime_status(config) if mode_val == 'production' else {}
+    stale_pid = os.path.exists(PID_PATH) and not is_running
+    fault = runtime.get('last_fault') or ('acquisition_process_exited' if stale_pid else None)
+    expected = mode_val == 'production' and (
+        bool(config.get('AUTO_START_ON_STARTUP', False)) or os.path.exists(PID_PATH))
+    fresh = time.time_ns() - runtime.get('checked_at_ns', 0) < 10_000_000_000
+    status = {
         'service_name': 'DAQ USB-4716',
         'port': 8081,
         'is_running': is_running,
-        'status': 'running' if is_running else 'stopped',
+        'status': ('faulted' if fault else
+                   'buffering' if is_running and runtime.get('last_writer_error') else
+                   'running' if is_running else 'stopped'),
         'mode': mode_val,
         'run_mode': mode_val,
         'pid': pid,
-        'destination': dest
-    })
+        'destination': dest,
+        'expected_running': expected,
+        'healthy': (not fault and not runtime.get('last_writer_error') and
+                    (not expected or (is_running and fresh and runtime.get('state') == 'running'))),
+        'fault': fault,
+        'pending_batches': runtime.get('pending_batches', 0),
+        'pending_bytes': runtime.get('pending_bytes', 0),
+        'spool_bytes': runtime.get('spool_bytes', 0),
+        'last_sample_ns': runtime.get('last_sample_ns'),
+        'writer_error': runtime.get('last_writer_error'),
+        'gaps': read_recent_gaps(config),
+        'retention_days': config.get('DB_RETENTION_DAYS', 30),
+    }
+    return jsonify(status)
+
+
+def read_runtime_status(config):
+    path = Path(config.get('SPOOL_DIR', '/var/lib/daq_navi/spool')) / 'status.json'
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+
+
+def read_recent_gaps(config):
+    import sqlite3
+    path = Path(config.get('SPOOL_DIR', '/var/lib/daq_navi/spool')) / 'production-spool.sqlite3'
+    if not path.exists():
+        return []
+    try:
+        with sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=1) as conn:
+            rows = conn.execute('SELECT start_ns,end_ns,cause FROM gaps ORDER BY start_ns DESC LIMIT 20').fetchall()
+        return [{'start_ns': start, 'end_ns': end, 'cause': cause} for start, end, cause in rows]
+    except (OSError, sqlite3.Error):
+        return []
+
+
+@app.route('/api/health', methods=['GET'])
+def get_health():
+    status = get_status().get_json()
+    return jsonify(status), 200 if status['healthy'] else 503
+
+
+@app.route('/api/samples', methods=['GET'])
+def get_samples():
+    try:
+        channel = int(request.args.get('channel', '0'))
+        if not 0 <= channel < 16:
+            raise ValueError('channel must be 0–15')
+    except ValueError as exc:
+        return jsonify({'message': str(exc)}), 400
+    config = read_config()
+    from psycopg2 import sql
+    table = config.get('DB_PRODUCTION_TABLE', 'daq_production_samples')
+    try:
+        import psycopg2
+        with psycopg2.connect(config['DB_DSN'], connect_timeout=3) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql.SQL('''SELECT time_bucket('1 second', time),
+                    avg(raw_voltage), avg(calibrated_value), unit, calibration_revision
+                    FROM {} WHERE channel=%s AND time > now() - INTERVAL '2 minutes'
+                    AND provenance='physical_daq'
+                    GROUP BY 1,4,5 ORDER BY 1''').format(sql.Identifier(table)), (channel,))
+                points = [{'time': row[0].isoformat() if hasattr(row[0], 'isoformat') else str(row[0]),
+                           'raw_voltage': row[1],
+                           'calibrated_value': row[2], 'unit': row[3],
+                           'calibration_revision': row[4]} for row in cursor.fetchall()]
+    except Exception as exc:
+        return jsonify({'message': f'Production samples unavailable: {exc}'}), 503
+    return jsonify({'channel': channel, 'points': points,
+                    'gaps': read_recent_gaps(config)})
 
 @app.route('/api/scan_usb', methods=['GET'])
 def api_scan_usb():
@@ -398,10 +617,16 @@ def handle_connect():
     """Fires when browser client opens or refreshes the page."""
     pid, mode = get_running_process()
     is_active = pid is not None
-    dest = read_config().get('DESTINATION', 'database')
+    config = read_config()
+    dest = config.get('DESTINATION', 'database')
+    try:
+        recorded_mode = Path(MODE_PATH).read_text(encoding='utf-8').strip()
+    except OSError:
+        recorded_mode = None
+    mode_val = mode or recorded_mode or config.get('AUTO_START_MODE', 'production')
     
     # 1. Update client running status immediately
-    emit('status_change', {'is_running': is_active, 'mode': mode or 'mockup', 'destination': dest})
+    emit('status_change', {'is_running': is_active, 'mode': mode_val, 'destination': dest})
     
     # 2. Feed last stats if process is active
     if is_active and last_stats:
@@ -418,117 +643,96 @@ def handle_connect():
 
 @socketio.on('start_daq')
 def handle_start(data):
-    """Spawns DAQ script in a detached process."""
-    pid, mode = get_running_process()
+    req_mode = (data or {}).get('mode')
+    result = start_acquisition(req_mode)
+    emit('control_result', result)
+
+
+def start_acquisition(mode=None):
+    if mode is None:
+        mode = read_config().get('AUTO_START_MODE', 'production')
+    if mode == 'real':
+        mode = 'production'
+    if mode not in ('production', 'mockup'):
+        return {'started': False, 'message': 'mode must be production or mockup'}
+    pid, _ = get_running_process()
     if pid is not None:
-        emit('log_update', {'log': '[SYSTEM] Warning: Ingestion process is already running.'})
-        return
-        
-    run_mode = data.get('mode', 'mockup')
-    write_desired_state(True, run_mode)
-    dest = read_config().get('DESTINATION', 'database')
-    script_name = "mockup_stream_to_db.py" if run_mode == "mockup" else "stream_to_db.py"
-    # Check core directory first, fallback to current or service dir
-    script_path = os.path.join(CORE_DIR, script_name)
-    if not os.path.exists(script_path):
-        script_path = os.path.join(SERVICE_DIR, script_name)
-    
+        return {'started': False, 'message': 'Acquisition is already running'}
+    config = read_config()
+    if mode == 'production':
+        try:
+            validate_production_config(DaqNaviConfig(config, allow_env_overrides=False))
+        except (ValueError, TypeError, KeyError) as exc:
+            return {'started': False, 'message': str(exc)}
+    script = 'stream_to_db.py' if mode == 'production' else 'mockup_stream_to_db.py'
+    args = [sys.executable, os.path.join(CORE_DIR, script)]
+    if mode == 'production':
+        args += ['--config', CONFIG_PATH]
     try:
-        # Clear/truncate old log file session
-        with open(LOG_PATH, 'w') as f:
-            f.write(f"[SYSTEM] Log session initialized for mode={run_mode.upper()} destination={dest.upper()}\n")
-            
-        # Open log file to pipe subprocess output
-        log_file = open(LOG_PATH, 'a')
-        
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        
-        # Spawn process completely detached using shell redirects
-        # close_fds: True on POSIX to detach FDs; must be False on
-        # Windows when stdout/stderr are redirected (Python limitation).
-        popen_kwargs = dict(
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            env=env,
-        )
-        if sys.platform != "win32":
-            popen_kwargs["close_fds"] = True
-        else:
-            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-
-        proc = subprocess.Popen(
-            [sys.executable, script_path],
-            **popen_kwargs,
-        )
-        
-        # Close file handle in parent process
-        log_file.close()
-        
-        # Persist PID & Mode metadata
-        with open(PID_PATH, 'w') as f:
-            f.write(str(proc.pid))
-        with open(MODE_PATH, 'w') as f:
-            f.write(run_mode)
-            
-        # Update sockets immediately
-        socketio.emit('status_change', {'is_running': True, 'mode': run_mode, 'destination': dest})
-        socketio.emit('log_update', {'log': f'[SYSTEM] Spawning process (PID: {proc.pid}) target={dest.upper()}'})
-        
-        # Start log tailer thread
+        with open(LOG_PATH, 'a', encoding='utf-8') as output:
+            process = subprocess.Popen(args, stdout=output, stderr=subprocess.STDOUT,
+                                       env={**os.environ, 'PYTHONUNBUFFERED': '1',
+                                            'DAQ_CONFIG_PATH': CONFIG_PATH},
+                                       close_fds=sys.platform != 'win32')
+        Path(PID_PATH).write_text(str(process.pid), encoding='utf-8')
+        Path(MODE_PATH).write_text(mode, encoding='utf-8')
         start_tailing()
-        
-        # Monitor initial process startup; auto-fallback to mockup if hardware fails
-        def check_initial_exit(p, mode_attempted):
-            time.sleep(1.5)
-            if p.poll() is not None and p.returncode != 0:
-                print(f"[SYSTEM] Process exited with code {p.returncode} in mode={mode_attempted.upper()}")
-                if os.getenv("AUTO_FALLBACK", "true").lower() in ("true", "1", "yes") and mode_attempted != "mockup":
-                    print("[SYSTEM] Hardware device failed. Auto-falling back to MOCKUP pipeline...")
-                    socketio.emit('log_update', {'log': '[SYSTEM] Hardware device failed. Auto-falling back to MOCKUP pipeline...'})
-                    handle_start({'mode': 'mockup'})
+        socketio.emit('status_change', {'is_running': True, 'mode': mode,
+                                        'destination': config.get('DESTINATION')})
+        return {'started': True, 'pid': process.pid, 'mode': mode}
+    except (OSError, ValueError) as exc:
+        return {'started': False, 'message': str(exc)}
 
-        threading.Thread(target=check_initial_exit, args=(proc, run_mode), daemon=True).start()
-        
-    except Exception as e:
-        socketio.emit('log_update', {'log': f'[SYSTEM] Failed to spawn process: {e}'})
+
+@app.route('/api/start', methods=['POST'])
+def api_start():
+    req_data = request.get_json(silent=True) or {}
+    mode = req_data.get('mode')
+    result = start_acquisition(mode)
+    return jsonify(result), 200 if result['started'] else 400
 
 @socketio.on('stop_daq')
 def handle_stop():
-    """Stops the detached process by its recorded PID."""
-    pid, _ = get_running_process()
+    emit('control_result', stop_acquisition(manual=True))
+
+
+def stop_acquisition(manual=True):
+    pid, mode = get_running_process()
     if pid is None:
-        socketio.emit('status_change', {'is_running': False})
-        emit('log_update', {'log': '[SYSTEM] Warning: Ingestion process is not running. Resetting UI state.'})
-        if os.path.exists(PID_PATH):
-            try: os.remove(PID_PATH)
-            except: pass
-        if os.path.exists(MODE_PATH):
-            try: os.remove(MODE_PATH)
-            except: pass
-        return
-        
-    current_state = read_desired_state()
-    write_desired_state(False, current_state.get('mode', 'mockup'))
-    socketio.emit('log_update', {'log': f'[SYSTEM] Terminating process (PID: {pid})...'})
-    
-    # 1. Stop log tailing thread
-    global stop_tail_event
+        stop_tail_event.set()
+        for path in (PID_PATH, MODE_PATH):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+        config = read_config()
+        runtime = read_runtime_status(config)
+        pending = runtime.get('pending_batches', 0)
+        return {'stopped': True, 'pending_batches': pending, 'pending_replay': pending > 0,
+                'drained': pending == 0, 'writer_error': runtime.get('last_writer_error')}
+    stopped = terminate_pid(pid)
+    if not stopped:
+        return {'stopped': False, 'message': 'Drain timeout; acquisition is still stopping'}
     stop_tail_event.set()
-    
-    # 2. Terminate background process
-    terminate_pid(pid)
-    
-    # 3. Clean up metadata files
-    if os.path.exists(PID_PATH):
-        try: os.remove(PID_PATH)
-        except: pass
-    if os.path.exists(MODE_PATH):
-        try: os.remove(MODE_PATH)
-        except: pass
-        
-    socketio.emit('status_change', {'is_running': False})
-    socketio.emit('log_update', {'log': '[SYSTEM] Ingestion process terminated.'})
+    for path in (PID_PATH, MODE_PATH):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    config = read_config()
+    runtime = read_runtime_status(config)
+    socketio.emit('status_change', {'is_running': False, 'mode': mode or config.get('AUTO_START_MODE', 'production')})
+    pending = runtime.get('pending_batches', 0)
+    return {'stopped': True, 'pending_batches': pending,
+            'pending_replay': pending > 0,
+            'drained': pending == 0,
+            'writer_error': runtime.get('last_writer_error')}
+
+
+@app.route('/api/stop', methods=['POST'])
+def api_stop():
+    result = stop_acquisition(manual=True)
+    return jsonify(result), 200 if result['stopped'] else 503
 
 def init_application():
     """Initial recovery check on Web GUI startup."""
@@ -538,24 +742,14 @@ def init_application():
         start_tailing()
     else:
         cfg = read_config()
-        desired_state = read_desired_state()
-        auto_start_enabled = cfg.get('AUTO_START_ON_STARTUP', True)
-        is_desired_running = desired_state.get('is_running', False)
-        
-        env_mockup = os.getenv("MOCKUP_MODE", "").lower() in ("true", "1", "yes")
-        env_mode = os.getenv("AUTO_START_MODE")
-        
-        if auto_start_enabled or is_desired_running:
-            if env_mode:
-                target_mode = env_mode.lower()
-            elif env_mockup:
-                target_mode = "mockup"
-            else:
-                target_mode = cfg.get('AUTO_START_MODE') or desired_state.get('mode', 'mockup')
-            print(f"[SYSTEM] Startup config AUTO_START_ON_STARTUP is enabled. Auto-starting DAQ ingestion in MODE={target_mode.upper()}...")
-            handle_start({'mode': target_mode})
+        if cfg.get('AUTO_START_ON_STARTUP', False):
+            target_mode = cfg.get('AUTO_START_MODE', 'production')
+            print(f"[SYSTEM] Auto-starting saved acquisition mode={target_mode}...")
+            result = start_acquisition(target_mode)
+            if not result['started']:
+                print(f"[SYSTEM] Auto-start failed: {result['message']}")
         else:
-            print("[SYSTEM] Startup config AUTO_START_ON_STARTUP is disabled. Awaiting manual start trigger.")
+            print("[SYSTEM] Auto-start is disabled. Awaiting manual start.")
 
 def handle_shutdown(sig, frame):
     print("[SYSTEM] Gracefully shutting down Web GUI and sub-pipeline...")

@@ -35,7 +35,13 @@ class TestTimescaleDBPolicies(unittest.TestCase):
     def setUpClass(cls):
         cls.config_path = os.path.join(SERVICE_DIR, "config.json")
         cls.cfg = load_daq_config(cls.config_path)
-        cls.dsn = cls.cfg.DB_DSN
+        cls.dsn = os.getenv("DAQ_TEST_DB_DSN")
+        if not cls.dsn:
+            cls.db_available = False
+            return
+        db_name = psycopg2.extensions.parse_dsn(cls.dsn).get("dbname", "")
+        if not db_name.startswith("daq_navi_test_"):
+            raise RuntimeError("DAQ_TEST_DB_DSN must name an isolated daq_navi_test_* database")
         try:
             conn = psycopg2.connect(cls.dsn, connect_timeout=3)
             conn.close()
@@ -45,7 +51,7 @@ class TestTimescaleDBPolicies(unittest.TestCase):
 
     def setUp(self):
         if not self.db_available:
-            self.skipTest("TimescaleDB database is not reachable at " + self.dsn)
+            self.skipTest("isolated DAQ_TEST_DB_DSN is not configured or reachable")
 
     def test_policies_and_aggregates_idempotent_init(self):
         # Running ensure_db_and_tables multiple times must succeed without error

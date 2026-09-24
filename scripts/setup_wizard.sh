@@ -564,7 +564,7 @@ write_env "POSTGRES_DB" "$POSTGRES_DB"
 write_env "MOCKUP_MODE" "$MOCKUP_MODE"
 
 # Sync parameters safely with services/daq_navi/config.json via argv
-if [[ -f "$DAQ_CONFIG_JSON" ]]; then
+if [[ -f "$DAQ_CONFIG_JSON" ]] && ! python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("_WEB_MANAGED") else 1)' "$DAQ_CONFIG_JSON"; then
   say "Updating $DAQ_CONFIG_JSON with configured parameters..."
   python3 -c "
 import sys, json
@@ -592,6 +592,8 @@ with open(config_path, 'w') as f:
     json.dump(cfg, f, indent=2)
 " "$DAQ_CONFIG_JSON" "$DEVICE_DESCRIPTION" "$DEVICE_ID" "$CHANNEL_COUNT" "$CLOCK_RATE" "$DESTINATION" "$DB_HOST" "$DB_PORT" "$POSTGRES_USER" "$POSTGRES_PASSWORD" "$POSTGRES_DB" "$MOCKUP_MODE" 2>/dev/null || warn "Could not automatically update $DAQ_CONFIG_JSON via python3"
   say "✓ config.json synchronized successfully."
+elif [[ -f "$DAQ_CONFIG_JSON" ]]; then
+  say "Web-managed DAQ settings are already saved; preserving config.json."
 fi
 pause "Stage 5 finished. Press Enter to proceed to stack launch and verification."
 
@@ -652,4 +654,3 @@ else
 fi
 
 finish
-

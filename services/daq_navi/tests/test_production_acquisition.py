@@ -1,0 +1,382 @@
+"""Standalone production acquisition contract; all data stays in temporary storage."""
+
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from services.daq_navi.core.production_acquisition import (
+    AcquisitionFault,
+    DurableSpool,
+    ProductionPipeline,
+    run_production,
+    validate_production_config,
+)
+from services.daq_navi.core.config_loader import DaqNaviConfig
+
+
+def configuration(**changes):
+    channels = {
+        str(index): {
+            "enabled": True,
+            "label": f"sensor-{index}",
+            "unit": "kPa",
+            "signal_type": "SingleEnded",
+            "value_range": "V_0To5",
+            "scale": {
+                "enabled": True,
+                "low_voltage": 0,
+                "high_voltage": 5,
+                "low_value": 0,
+                "high_value": 100,
+                "revision": "r1",
+            },
+        }
+        for index in range(4)
+    }
+    data = {
+        "DEVICE_ID": "test-device",
+        "START_CHANNEL": 0,
+        "CHANNEL_COUNT": 4,
+        "CLOCK_RATE": 2000,
+        "SECTION_LENGTH": 2,
+        "MOCKUP_MODE": False,
+        "DESTINATION": "postgresql",
+        "DB_TABLE": "test_production_samples",
+        "CHANNELS": channels,
+        "SPOOL_MAX_BYTES": 1024 * 1024,
+    }
+    data.update(changes)
+    return DaqNaviConfig(data, allow_env_overrides=False)
+
+
+class FakeDaq:
+    def __init__(self, batches):
+        self.batches = iter(batches)
+        self.closed = False
+
+    def read(self, count):
+        return next(self.batches)
+
+    def close(self):
+        self.closed = True
+
+
+class FakeDestination:
+    def __init__(self):
+        self.rows = {}
+        self.gaps = {}
+        self.fail = False
+        self.uncertain = False
+
+    def write(self, rows, gaps):
+        if self.fail:
+            raise ConnectionError("database unavailable")
+        for row in rows:
+            self.rows[(row["time_ns"], row["sample_id"])] = row
+        for gap in gaps:
+            self.gaps[gap["gap_id"]] = gap
+        if self.uncertain:
+            self.uncertain = False
+            raise ConnectionError("commit response lost")
+
+
+class ProductionAcquisitionTests(unittest.TestCase):
+    def test_spool_capacity_counter_recovers_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spool = DurableSpool(Path(directory), 4096)
+            spool.append("batch-1", [{"sample_id": "first"}])
+            pending = spool.pending_bytes
+            self.assertGreater(pending, 0)
+            self.assertEqual(spool.pending_batches, 1)
+            spool.close()
+            reopened = DurableSpool(Path(directory), 4096)
+            self.assertEqual(reopened.pending_bytes, pending)
+            self.assertEqual(reopened.pending_batches, 1)
+            reopened.acknowledge("batch-1")
+            self.assertEqual(reopened.pending_bytes, 0)
+            self.assertEqual(reopened.pending_batches, 0)
+            reopened.close()
+
+    def test_spool_replays_commit_order_when_wall_clock_moves_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spool = DurableSpool(Path(directory), 4096)
+            with patch("services.daq_navi.core.production_acquisition.time.time_ns",
+                       side_effect=(200, 100)):
+                spool.append("first", [{"sample_id": "first"}])
+                spool.append("second", [{"sample_id": "second"}])
+            spool.close()
+            restarted = DurableSpool(Path(directory), 4096)
+            self.assertEqual(restarted.oldest()[0], "first")
+            restarted.acknowledge("first")
+            self.assertEqual(restarted.oldest()[0], "second")
+            restarted.close()
+
+    def test_spool_commits_sample_position_and_gap_boundary_with_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spool = DurableSpool(Path(directory), 4096)
+            spool.open_gap(100, "daq_read_failed")
+            spool.append("batch-1", [{"time_ns": 200}, {"time_ns": 300}],
+                         first_sample_ns=200, last_sample_ns=300)
+            spool.close()
+            restarted = DurableSpool(Path(directory), 4096)
+            self.assertEqual(restarted.state_value("last_sample_ns"), "300")
+            gap = restarted.pending_gaps()[0]
+            self.assertEqual((gap["start_ns"], gap["end_ns"]), (100, 200))
+            restarted.close()
+
+    def test_four_channels_keep_raw_calibration_and_last_sample_time(self):
+        cfg = configuration()
+        with tempfile.TemporaryDirectory() as directory:
+            destination = FakeDestination()
+            pipeline = ProductionPipeline(cfg, Path(directory), destination, session_id="test-session")
+            pipeline.capture([0, 1, 2, 3, 5, 4, 3, 2], end_time_ns=1_700_000_000_000_500_000)
+            pipeline.flush_once()
+            first = destination.rows[(1_700_000_000_000_000_000, "test-session:0:0")]
+            self.assertEqual((first["raw_voltage"], first["calibrated_value"], first["unit"], first["calibration_revision"]), (0, 0, "kPa", "r1"))
+            self.assertEqual(len(destination.rows), 8)
+            pipeline.close()
+
+    def test_new_calibration_changes_only_future_samples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = FakeDestination()
+            old = ProductionPipeline(configuration(), Path(directory), destination,
+                                     session_id="00000000-0000-0000-0000-000000000001")
+            old.capture([2, 2, 2, 2], end_time_ns=1_700_000_000_000_000_000)
+            old.flush_once()
+            old.close()
+            raw = configuration().raw
+            raw["CHANNELS"]["0"]["scale"]["high_value"] = 200
+            raw["CHANNELS"]["0"]["scale"]["revision"] = "r2"
+            new = ProductionPipeline(DaqNaviConfig(raw), Path(directory), destination,
+                                     session_id="00000000-0000-0000-0000-000000000002")
+            new.capture([2, 2, 2, 2], end_time_ns=1_700_000_001_000_000_000)
+            new.flush_once()
+            samples = sorted((row for row in destination.rows.values() if row["channel"] == 0),
+                             key=lambda row: row["time_ns"])
+            self.assertEqual([(row["calibrated_value"], row["calibration_revision"])
+                              for row in samples], [(40, "r1"), (80, "r2")])
+            new.close()
+
+    def test_outage_restart_and_uncertain_commit_replay_once(self):
+        cfg = configuration()
+        with tempfile.TemporaryDirectory() as directory:
+            destination = FakeDestination()
+            pipeline = ProductionPipeline(cfg, Path(directory), destination, session_id="test-session")
+            pipeline.capture([1, 2, 3, 4], end_time_ns=1_700_000_000_000_000_000)
+            destination.fail = True
+            with self.assertRaises(ConnectionError):
+                pipeline.flush_once()
+            pipeline.close()
+            destination.fail = False
+            destination.uncertain = True
+            restarted = ProductionPipeline(cfg, Path(directory), destination, session_id="new-session")
+            with self.assertRaises(ConnectionError):
+                restarted.flush_once()
+            restarted.flush_once()
+            self.assertEqual(len(destination.rows), 4)
+            self.assertEqual(restarted.pending_batches, 0)
+            restarted.close()
+
+    def test_late_read_does_not_retimestamp_continuous_samples(self):
+        cfg = configuration()
+        with tempfile.TemporaryDirectory() as directory:
+            destination = FakeDestination()
+            pipeline = ProductionPipeline(cfg, Path(directory), destination, session_id="test-session")
+            pipeline.capture([1, 2, 3, 4], end_time_ns=1_700_000_000_000_000_000)
+            # A stalled reader may receive an older queued hardware batch late.
+            pipeline.capture([1, 2, 3, 4], end_time_ns=1_700_000_003_000_000_000)
+            pipeline.flush_once()
+            pipeline.flush_once()
+            second = destination.rows[(1_700_000_000_000_500_000, "test-session:1:0")]
+            self.assertEqual(second["channel"], 0)
+            pipeline.close()
+
+    def test_reliable_read_timing_slews_clock_without_backward_samples(self):
+        cfg = configuration()
+        anchor = 1_700_000_000_000_000_000
+        frames_per_batch = 20
+        dt_ns = 500_000
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = ProductionPipeline(cfg, Path(directory), FakeDestination())
+            previous = None
+            for batch in range(240):
+                first_frame = batch * frames_per_batch
+                last_frame = first_frame + frames_per_batch - 1
+                # An exaggerated 0.5% drift makes the correction observable
+                # in a short test. At batch 40 the wall clock steps back.
+                drift_ns = round(last_frame * dt_ns * 0.005)
+                wall_step_ns = -500_000_000 if batch >= 40 else 0
+                end_ns = anchor + last_frame * dt_ns + 10_000_000 + drift_ns + wall_step_ns
+                pipeline.capture([1.0] * (frames_per_batch * 4), end_ns,
+                                 hardware_start_ns=anchor if batch == 0 else None,
+                                 timing_reliable=True)
+                if previous is not None:
+                    self.assertGreater(pipeline.last_sample_ns, previous)
+                previous = pipeline.last_sample_ns
+            self.assertLess(abs(end_ns - pipeline.last_sample_ns - 10_000_000), 50_000_000)
+            pipeline.close()
+
+    def test_first_read_delay_uses_hardware_start_boundary(self):
+        cfg = configuration()
+        with tempfile.TemporaryDirectory() as directory:
+            destination = FakeDestination()
+            pipeline = ProductionPipeline(cfg, Path(directory), destination, session_id="test-session")
+            pipeline.capture([1, 2, 3, 4], end_time_ns=1_700_000_003_000_000_000,
+                             hardware_start_ns=1_700_000_000_000_000_000)
+            pipeline.flush_once()
+            self.assertIn((1_700_000_000_000_000_000, "test-session:0:0"), destination.rows)
+            pipeline.close()
+
+    def test_full_buffer_stops_capture_with_gap(self):
+        cfg = configuration(SPOOL_MAX_BYTES=1)
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = ProductionPipeline(cfg, Path(directory), FakeDestination(), session_id="test-session")
+            with self.assertRaises(AcquisitionFault):
+                pipeline.capture([1, 2, 3, 4], end_time_ns=1_700_000_000_000_000_000)
+            self.assertEqual(pipeline.last_fault, "buffer_full")
+            self.assertEqual(pipeline.spool.pending_gaps()[0]["cause"], "buffer_full")
+            pipeline.close()
+
+    def test_unwritable_buffer_stops_capture_with_gap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = ProductionPipeline(configuration(), Path(directory), FakeDestination())
+            with patch("services.daq_navi.core.production_acquisition.shutil.disk_usage",
+                       return_value=SimpleNamespace(free=0)):
+                with self.assertRaisesRegex(AcquisitionFault, "buffer_unwritable"):
+                    pipeline.capture([1, 2, 3, 4], end_time_ns=1_700_000_000_000_000_000)
+            self.assertEqual(pipeline.spool.pending_gaps()[0]["cause"], "buffer_unwritable")
+            pipeline.close()
+
+    def test_incomplete_enabled_channel_is_rejected(self):
+        cfg = configuration()
+        cfg.channels[2].unit = ""
+        with self.assertRaisesRegex(ValueError, "channel 2.*unit"):
+            validate_production_config(cfg)
+
+    def test_null_metadata_and_boolean_calibration_are_rejected(self):
+        cases = (("label", None, "label"),
+                 ("unit", None, "unit"),
+                 ("scale.revision", None, "revision"),
+                 ("scale.low_voltage", True, "low_voltage"))
+        for key, value, error_field in cases:
+            with self.subTest(key=key):
+                raw = configuration().raw
+                target = raw["CHANNELS"]["2"]
+                if key.startswith("scale."):
+                    target["scale"][key.split(".", 1)[1]] = value
+                else:
+                    target[key] = value
+                with self.assertRaisesRegex(ValueError, f"channel 2.*{error_field}"):
+                    validate_production_config(DaqNaviConfig(raw))
+
+    def test_malformed_scale_identifies_channel(self):
+        raw = configuration().raw
+        raw["CHANNELS"]["2"]["scale"] = None
+        with self.assertRaisesRegex(ValueError, "channel 2 scale"):
+            DaqNaviConfig(raw)
+
+    def test_finite_section_count_is_rejected_for_continuous_acquisition(self):
+        with self.assertRaisesRegex(ValueError, "SECTION_COUNT"):
+            validate_production_config(configuration(SECTION_COUNT=1))
+
+    def test_fractional_rate_is_not_silently_truncated(self):
+        with self.assertRaisesRegex(ValueError, "CLOCK_RATE must be an integer"):
+            validate_production_config(configuration(CLOCK_RATE=1999.9))
+
+    def test_string_false_cannot_silently_enable_a_channel(self):
+        cfg = configuration()
+        cfg.raw["CHANNELS"]["2"]["enabled"] = "false"
+        with self.assertRaisesRegex(ValueError, "channel 2 enabled"):
+            validate_production_config(cfg)
+
+    def test_unknown_daq_signal_type_and_range_are_rejected(self):
+        for setting, invalid in (("signal_type", "UnknownSignal"),
+                                 ("value_range", "UnknownRange")):
+            with self.subTest(setting=setting):
+                raw = configuration().raw
+                raw["CHANNELS"]["2"][setting] = invalid
+                with self.assertRaisesRegex(ValueError, f"channel 2 {setting}"):
+                    validate_production_config(DaqNaviConfig(raw))
+
+    def test_disabled_channel_is_not_persisted(self):
+        raw = configuration().raw
+        raw["CHANNELS"]["2"]["enabled"] = False
+        cfg = DaqNaviConfig(raw)
+        with tempfile.TemporaryDirectory() as directory:
+            destination = FakeDestination()
+            pipeline = ProductionPipeline(cfg, Path(directory), destination)
+            pipeline.capture([1, 2, 3, 4], end_time_ns=1_700_000_000_000_000_000)
+            pipeline.flush_once()
+            self.assertEqual(sorted(row["channel"] for row in destination.rows.values()), [0, 1, 3])
+            pipeline.close()
+
+    def test_hardware_fault_fails_run_and_records_gap(self):
+        cfg = configuration()
+
+        class FaultyDaq:
+            def __init__(self, _cfg):
+                pass
+
+            def read(self, _count):
+                raise AcquisitionFault("daq_read_failed")
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = FakeDestination()
+            with self.assertRaisesRegex(AcquisitionFault, "daq_read_failed"):
+                run_production(cfg, daq_factory=FaultyDaq, destination=destination, spool_dir=directory)
+            self.assertEqual(next(iter(destination.gaps.values()))["cause"], "daq_read_failed")
+
+    def test_fault_gap_closes_at_first_sample_after_restart(self):
+        cfg = configuration()
+        with tempfile.TemporaryDirectory() as directory:
+            destination = FakeDestination()
+            first = ProductionPipeline(cfg, Path(directory), destination, session_id="first-session")
+            first.capture([1, 2, 3, 4], end_time_ns=1_700_000_000_000_000_000)
+            first.flush_once()
+            with self.assertRaises(AcquisitionFault):
+                first.fault("daq_read_failed", 1_700_000_000_100_000_000)
+            first.close()
+            second = ProductionPipeline(cfg, Path(directory), destination, session_id="second-session")
+            second.capture([1, 2, 3, 4], end_time_ns=1_700_000_005_000_000_000)
+            second.flush_once()
+            gap = next(iter(destination.gaps.values()))
+            self.assertEqual(gap["cause"], "daq_read_failed")
+            self.assertEqual(gap["end_ns"], 1_700_000_005_000_000_000)
+            second.close()
+
+    def test_requested_stop_preserves_pending_batch_when_database_is_down(self):
+        cfg = configuration()
+        from threading import Event
+        stop = Event()
+
+        class StoppingDaq:
+            def __init__(self, _cfg):
+                pass
+
+            def read(self, _count):
+                stop.set()
+                return [1, 2, 3, 4], 1_700_000_000_000_000_000
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = FakeDestination()
+            destination.fail = True
+            outcome = run_production(cfg, stop_event=stop, daq_factory=StoppingDaq,
+                                     destination=destination, spool_dir=directory)
+            self.assertEqual(outcome["pending_batches"], 1)
+            destination.fail = False
+            restarted = ProductionPipeline(cfg, Path(directory), destination)
+            restarted.flush_once()
+            self.assertEqual(len(destination.rows), 4)
+            restarted.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

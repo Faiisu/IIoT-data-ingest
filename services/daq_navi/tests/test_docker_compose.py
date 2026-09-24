@@ -162,13 +162,16 @@ class TestDockerComposeStack(unittest.TestCase):
         os.environ["INFLUX_TOKEN"] = "token123"
 
         try:
-            cfg = load_daq_config(config_path)
+            cfg = load_daq_config()
             self.assertTrue(cfg.MOCKUP_MODE)
             self.assertEqual(cfg.DESTINATION, "mqtt")
             self.assertEqual(cfg.DB_DSN, "postgresql://test:test@timescaledb:5432/testdb")
             self.assertEqual(cfg.MQTT_BROKER, "broker.test.local")
             self.assertEqual(cfg.INFLUX_URL, "http://influxdb:8086")
             self.assertEqual(cfg.INFLUX_TOKEN, "token123")
+            explicit = load_daq_config(config_path)
+            self.assertEqual(explicit.DESTINATION, base_cfg.DESTINATION)
+            self.assertEqual(explicit.DB_DSN, base_cfg.DB_DSN)
         finally:
             for k in ["MOCKUP_MODE", "DESTINATION", "DB_DSN", "MQTT_BROKER", "INFLUX_URL", "INFLUX_TOKEN"]:
                 os.environ.pop(k, None)

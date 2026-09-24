@@ -53,7 +53,8 @@ except ImportError:
         check_pipeline_watchdog
     )
 
-config = load_daq_config()
+config = load_daq_config(os.getenv('DAQ_CONFIG_PATH'))
+config.DB_TABLE = config.DB_MOCKUP_TABLE
 
 # ─── Mock-up Tuning ──────────────────────────────────────────────────────────
 # Waveform parameters per channel offset: (amplitude_V, frequency_Hz, dc_offset_V)

@@ -31,7 +31,7 @@ class TestConfigAndSchema(unittest.TestCase):
         self.assertEqual(cfg.CLOCK_RATE, 2000)
         self.assertEqual(cfg.DB_TABLE, "daq_telemetry")
         self.assertEqual(cfg.DESTINATION, "postgresql")
-        self.assertEqual(cfg.DB_RETENTION_DAYS, 90)
+        self.assertEqual(cfg.DB_RETENTION_DAYS, 30)
         self.assertEqual(cfg.DB_COMPRESSION_INTERVAL, "1 hour")
         
         # Verify 4 channels are parsed

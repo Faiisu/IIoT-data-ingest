@@ -71,7 +71,7 @@ try:
     from .config_loader import load_daq_config
 except ImportError:
     from config_loader import load_daq_config
-config = load_daq_config()
+config = load_daq_config(os.path.join(SERVICE_DIR, 'config.json'))
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -1019,5 +1019,20 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
-
+    import argparse
+    parser = argparse.ArgumentParser(description="Standalone physical DAQ acquisition")
+    parser.add_argument("--config", help="DAQ configuration JSON path")
+    args = parser.parse_args()
+    selected_config = load_daq_config(args.config) if args.config else config
+    try:
+        from .production_acquisition import run_production
+    except ImportError:
+        from production_acquisition import run_production
+    requested_stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: requested_stop.set())
+    signal.signal(signal.SIGINT, lambda *_: requested_stop.set())
+    try:
+        run_production(selected_config, stop_event=requested_stop)
+    except Exception as exc:
+        log.error("Physical production acquisition failed: %s", exc)
+        sys.exit(1)

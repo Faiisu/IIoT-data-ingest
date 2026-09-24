@@ -9,7 +9,7 @@ if (typeof io !== 'undefined') {
     console.warn('Socket.IO library not loaded; realtime updates disabled.');
 }
 let isSystemRunning = false;
-let scaleConfigs = {};
+let channelConfigs = {};
 let currentScaleChannel = '0';
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -20,6 +20,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Initial API loads
     loadConfig();
     checkProcessStatus();
+    refreshRetentionPolicy();
+    setInterval(checkProcessStatus, 4000);
     resolveBackLink();
 
     // Setup form submit handlers
@@ -29,6 +31,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Setup scaling toggle, destination toggle, and target channel listeners
     document.getElementById('SCALE_ENABLED').addEventListener('change', toggleScalingFields);
     document.getElementById('SCALE_CHANNEL_TARGET').addEventListener('change', handleScaleChannelTargetChange);
+    document.getElementById('graph-channel').addEventListener('change', refreshProductionGraphs);
     const destEl = document.getElementById('DESTINATION');
     if (destEl) {
         destEl.addEventListener('change', toggleDestinationFields);
@@ -62,8 +65,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Bind Socket.IO event listeners
     bindSocketEvents();
 
-    // Start Phosphor Signal Trace Oscilloscope Animation
-    initSignalTraceCanvas();
+    refreshProductionGraphs();
+    setInterval(refreshProductionGraphs, 10000);
 });
 
 // Scan Host PC USB / DAQ Hardware
@@ -132,53 +135,61 @@ async function handleScanUsbDevices() {
     }
 }
 
-// Phosphor Signal Trace Oscilloscope Animation
-let canvasPhase = 0;
-function initSignalTraceCanvas() {
-    const canvas = document.getElementById('signal-canvas');
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-
-    function renderTrace() {
-        const w = canvas.width;
-        const h = canvas.height;
-        ctx.clearRect(0, 0, w, h);
-
-        // Draw grid baseline
-        ctx.strokeStyle = 'rgba(0, 242, 254, 0.12)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(0, h / 2);
-        ctx.lineTo(w, h / 2);
-        ctx.stroke();
-
-        if (isSystemRunning) {
-            canvasPhase += 0.15;
-            ctx.beginPath();
-            ctx.strokeStyle = '#00f2fe';
-            ctx.lineWidth = 1.8;
-            ctx.shadowBlur = 8;
-            ctx.shadowColor = '#00f2fe';
-
-            for (let x = 0; x < w; x++) {
-                const y = h / 2 + Math.sin(x * 0.08 + canvasPhase) * (h * 0.35) + (Math.random() - 0.5) * 2;
-                if (x === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
-            }
-            ctx.stroke();
-            ctx.shadowBlur = 0;
-        } else {
-            // Idle flatline
-            ctx.beginPath();
-            ctx.strokeStyle = 'rgba(100, 116, 139, 0.4)';
-            ctx.lineWidth = 1;
-            ctx.moveTo(0, h / 2);
-            ctx.lineTo(w, h / 2);
-            ctx.stroke();
-        }
-        requestAnimationFrame(renderTrace);
+async function refreshProductionGraphs() {
+    const message = document.getElementById('sample-graph-message');
+    try {
+        const channel = document.getElementById('graph-channel').value || '0';
+        const response = await fetch(`/api/samples?channel=${encodeURIComponent(channel)}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message || 'Samples unavailable');
+        const revisions = [...new Set(data.points.map(point => point.calibration_revision))].filter(Boolean);
+        const units = [...new Set(data.points.map(point => point.unit))].filter(Boolean);
+        document.getElementById('calibrated-graph-label').textContent = `Calibrated measurement (${units.join(', ') || 'unit unknown'}; calibration ${revisions.join(', ') || 'unknown'})`;
+        message.textContent = data.points.length ? `${data.points.length} one-second aggregates · shaded areas are acquisition gaps` : 'No physical DAQ samples in the last 2 minutes';
+        drawProductionGraph('raw-sample-graph', data.points, data.gaps, 'raw_voltage');
+        drawProductionGraph('calibrated-sample-graph', data.points, data.gaps, 'calibrated_value');
+    } catch (error) {
+        message.textContent = error.message;
+        drawProductionGraph('raw-sample-graph', [], [], 'raw_voltage');
+        drawProductionGraph('calibrated-sample-graph', [], [], 'calibrated_value');
     }
-    requestAnimationFrame(renderTrace);
+}
+
+function drawProductionGraph(canvasId, points, gaps, field) {
+    const canvas = document.getElementById(canvasId);
+    const ctx = canvas.getContext('2d');
+    const end = Date.now();
+    const start = end - 2 * 60 * 1000;
+    const x = timestamp => (timestamp - start) / (end - start) * canvas.width;
+    const values = points.map(point => Number(point[field])).filter(Number.isFinite);
+    const low = values.length ? Math.min(...values) : 0;
+    const high = values.length ? Math.max(...values) : 1;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#f8faf9';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#f5dfdf';
+    gaps.forEach(gap => {
+        const left = Math.max(0, x(gap.start_ns / 1e6));
+        const right = Math.min(canvas.width, x(gap.end_ns ? gap.end_ns / 1e6 : end));
+        if (right > left) ctx.fillRect(left, 0, right - left, canvas.height);
+    });
+    ctx.strokeStyle = field === 'raw_voltage' ? '#146b53' : '#386da5';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    let previous = null;
+    points.forEach(point => {
+        const timestamp = Date.parse(point.time);
+        const value = Number(point[field]);
+        if (!Number.isFinite(value)) return;
+        const px = x(timestamp);
+        const py = canvas.height - 8 - (value - low) / (high - low || 1) * (canvas.height - 16);
+        const gapBetween = gaps.some(gap => gap.start_ns / 1e6 <= timestamp &&
+            (gap.end_ns === null || gap.end_ns / 1e6 >= previous));
+        if (previous === null || timestamp - previous > 2000 || gapBetween) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+        previous = timestamp;
+    });
+    ctx.stroke();
 }
 
 // Toggle visibility of Destination settings (shows ONLY selected destination)
@@ -262,9 +273,17 @@ async function loadConfig() {
             }
         });
         
-        // Store per-channel scale configurations
-        scaleConfigs = config.SCALE_CONFIGS || {};
-        currentScaleChannel = document.getElementById('SCALE_CHANNEL_TARGET').value || '0';
+        channelConfigs = structuredClone(config.CHANNELS || {});
+        document.getElementById('mode-select').value = config.AUTO_START_MODE || 'production';
+        const graphChannel = document.getElementById('graph-channel');
+        const selectedGraphChannel = graphChannel.value;
+        graphChannel.replaceChildren();
+        Object.entries(channelConfigs).filter(([, channel]) => channel.enabled).forEach(([number, channel]) => {
+            graphChannel.add(new Option(`${number}: ${channel.label}`, number));
+        });
+        graphChannel.value = selectedGraphChannel && channelConfigs[selectedGraphChannel]?.enabled ? selectedGraphChannel : (graphChannel.options[0]?.value || '0');
+        currentScaleChannel = '0';
+        document.getElementById('SCALE_CHANNEL_TARGET').value = '0';
         loadScaleChannelToInputs(currentScaleChannel);
         toggleDestinationFields();
         toggleTlsFields();
@@ -281,14 +300,55 @@ async function checkProcessStatus() {
         const res = await fetch('/api/status');
         if (!res.ok) throw new Error("Failed to get status.");
         const status = await res.json();
-        updateUIState(status.is_running, status.run_mode, status.destination);
+        updateUIState(status.is_running, status.run_mode, status.destination, status);
+        showProductionStatus(status);
     } catch (e) {
         appendLog('ERROR', `Failed to query process status: ${e.message}`);
     }
 }
 
+function showProductionStatus(status) {
+    const summary = document.getElementById('production-health-summary');
+    const buffer = document.getElementById('production-health-buffer');
+    const gaps = document.getElementById('production-health-gaps');
+    if (!summary || !buffer || !gaps) return;
+    const detail = status.fault || status.writer_error || (status.healthy ? 'healthy' : (status.is_running ? 'waiting for data' : 'acquisition stopped'));
+    summary.textContent = `${status.status.toUpperCase()} · ${status.mode} · ${detail}`;
+    buffer.textContent = `Buffer: ${(status.spool_bytes / (1024 ** 2)).toFixed(1)} MiB · pending replay: ${status.pending_batches} batches · retention: ${status.retention_days} days`;
+    document.getElementById('telemetry-polled').textContent = status.last_sample_ns ? new Date(status.last_sample_ns / 1e6).toLocaleTimeString() : '—';
+    document.getElementById('telemetry-written').textContent = status.pending_batches;
+    document.getElementById('telemetry-loss').textContent = (status.gaps || []).length;
+    document.getElementById('telemetry-queue').textContent = `${(status.spool_bytes / (1024 ** 2)).toFixed(1)} MiB`;
+    gaps.replaceChildren();
+    if (!status.gaps || status.gaps.length === 0) {
+        const item = document.createElement('div');
+        item.className = 'text-muted';
+        item.textContent = 'No recorded acquisition gaps in buffer.';
+        gaps.appendChild(item);
+    } else {
+        status.gaps.forEach(gap => {
+            const item = document.createElement('div');
+            item.textContent = `Gap: ${new Date(gap.start_ns / 1e6).toLocaleString()} – ${gap.end_ns ? new Date(gap.end_ns / 1e6).toLocaleString() : 'ongoing'} · ${gap.cause}`;
+            gaps.appendChild(item);
+        });
+    }
+}
+
+async function refreshRetentionPolicy() {
+    const element = document.getElementById('production-retention-policy');
+    if (!element) return;
+    try {
+        const response = await fetch('/api/retention');
+        const data = await response.json();
+        element.textContent = response.ok ? `Effective TimescaleDB retention: ${data.effective}` :
+            `Retention policy error: ${data.message}`;
+    } catch (error) {
+        element.textContent = `Retention policy error: ${error.message}`;
+    }
+}
+
 // Update Start/Stop buttons and indicator dots
-function updateUIState(running, mode = 'mockup', destination = 'database') {
+function updateUIState(running, mode = 'mockup', destination = 'database', status = null) {
     isSystemRunning = running;
     
     const startBtn = document.getElementById('start-btn');
@@ -300,7 +360,21 @@ function updateUIState(running, mode = 'mockup', destination = 'database') {
 
     const destLabel = (destination || 'database').toUpperCase();
 
-    if (running) {
+    if (status && status.status === 'faulted') {
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        modeSelect.disabled = false;
+        statusIndicator.classList.remove('active');
+        statusDot.className = 'pulse-dot offline';
+        statusText.textContent = `FAULTED (${(status.fault || 'ERROR').toUpperCase()})`;
+    } else if (status && status.status === 'buffering') {
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        modeSelect.disabled = true;
+        statusIndicator.classList.add('active');
+        statusDot.className = 'pulse-dot buffering';
+        statusText.textContent = `BUFFERING (${(mode || '').toUpperCase()} - ${destLabel})`;
+    } else if (running) {
         startBtn.disabled = true;
         stopBtn.disabled = false;
         modeSelect.disabled = true;
@@ -320,9 +394,6 @@ function updateUIState(running, mode = 'mockup', destination = 'database') {
         statusIndicator.classList.remove('active');
         statusDot.className = 'pulse-dot offline';
         statusText.textContent = 'OFFLINE';
-        
-        // Reset telemetry values to 0
-        document.getElementById('telemetry-queue').textContent = '0 / 200';
     }
 }
 
@@ -344,15 +415,14 @@ async function handleConfigSave(e) {
             configData[el.name] = el.checked;
         } else if (el.name === 'ANCHOR_RECALIBRATE_INTERVAL_HR') {
             configData[el.name] = parseFloat(el.value);
-        } else if (['START_CHANNEL', 'CHANNEL_COUNT', 'CLOCK_RATE', 'SECTION_LENGTH', 'SECTION_COUNT', 'QUEUE_MAXSIZE', 'DB_PAGE_SIZE', 'STATS_INTERVAL_SEC', 'MQTT_PORT', 'MQTT_QOS'].includes(el.name)) {
+        } else if (['START_CHANNEL', 'CHANNEL_COUNT', 'CLOCK_RATE', 'SECTION_LENGTH', 'SECTION_COUNT', 'QUEUE_MAXSIZE', 'DB_PAGE_SIZE', 'DB_RETENTION_DAYS', 'STATS_INTERVAL_SEC', 'MQTT_PORT', 'MQTT_QOS'].includes(el.name)) {
             configData[el.name] = parseInt(el.value, 10);
         } else {
             configData[el.name] = el.value;
         }
     }
 
-    // Inject scaling configs dictionary
-    configData['SCALE_CONFIGS'] = scaleConfigs;
+    configData.CHANNELS = channelConfigs;
 
     try {
         const res = await fetch('/api/config', {
@@ -361,32 +431,34 @@ async function handleConfigSave(e) {
             body: JSON.stringify(configData)
         });
         
-        if (!res.ok) throw new Error("Failed to save.");
-        showToast("Configuration saved successfully.");
+        const saved = await res.json();
+        if (!res.ok) throw new Error(saved.message || 'Failed to save');
+        showToast(`Saved. Raw retention: ${saved.retention_days} days.`);
         appendLog('SUCCESS', 'Configuration changes committed to config.json.');
+        await loadConfig();
+        await checkProcessStatus();
+        await refreshRetentionPolicy();
     } catch (e) {
-        showToast("Error saving configuration.", true);
+        showToast(`Save failed: ${e.message}`, true);
         appendLog('ERROR', `Failed to write config: ${e.message}`);
     }
 }
 
 // Handle Run command
-function handleStartProcess() {
+async function handleStartProcess() {
     const mode = document.getElementById('mode-select').value;
-    if (socket) {
-        socket.emit('start_daq', { mode: mode });
-    } else {
-        appendLog('ERROR', 'Socket.IO bridge unavailable. Cannot start process.');
-    }
+    const response = await fetch('/api/start', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode})});
+    const result = await response.json();
+    if (!response.ok) showToast(result.message || 'Start failed', true);
+    await checkProcessStatus();
 }
 
 // Handle Stop command
-function handleStopProcess() {
-    if (socket) {
-        socket.emit('stop_daq');
-    } else {
-        appendLog('ERROR', 'Socket.IO bridge unavailable. Cannot stop process.');
-    }
+async function handleStopProcess() {
+    const response = await fetch('/api/stop', {method: 'POST'});
+    const result = await response.json();
+    showToast(response.ok ? (result.pending_replay ? 'Stopped; batches pending replay' : 'Stopped; buffer drained') : result.message, !response.ok);
+    await checkProcessStatus();
 }
 
 // Clear terminal logs
@@ -468,22 +540,6 @@ function bindSocketEvents() {
         appendLog(level, line);
     });
 
-    // Process statistics and telemetry
-    socket.on('stats_update', (data) => {
-        document.getElementById('telemetry-polled').textContent = data.polled;
-        document.getElementById('telemetry-written').textContent = data.written;
-        document.getElementById('telemetry-queue').textContent = data.queue_util;
-        
-        const lossVal = document.getElementById('telemetry-loss');
-        lossVal.textContent = `${data.loss_pct}% (${data.dropped})`;
-        
-        // Highlight loss if rate is above 0
-        if (parseInt(data.dropped, 10) > 0) {
-            lossVal.className = 'telemetry-value monospace text-error';
-        } else {
-            lossVal.className = 'telemetry-value monospace text-amber';
-        }
-    });
 }
 
 // Enable/Disable scaling sub-inputs based on toggle checkbox
@@ -501,23 +557,36 @@ function toggleScalingFields() {
 
 // Load calibration data from config object to input fields
 function loadScaleChannelToInputs(ch) {
-    const cfg = scaleConfigs[ch] || { enabled: false, low_voltage: 0.0, high_voltage: 10.0, low_value: 0.0, high_value: 100.0 };
-    document.getElementById('SCALE_ENABLED').checked = cfg.enabled;
-    document.getElementById('SCALE_LOW_VOLTAGE').value = cfg.low_voltage;
-    document.getElementById('SCALE_HIGH_VOLTAGE').value = cfg.high_voltage;
-    document.getElementById('SCALE_LOW_VALUE').value = cfg.low_value;
-    document.getElementById('SCALE_HIGH_VALUE').value = cfg.high_value;
+    const cfg = channelConfigs[ch] || {enabled: false, label: '', unit: '', signal_type: 'SingleEnded', value_range: 'V_0To5', scale: {enabled: false, low_voltage: 0, high_voltage: 5, low_value: 0, high_value: 100, revision: ''}};
+    const scale = cfg.scale || {};
+    document.getElementById('CHANNEL_ENABLED').checked = cfg.enabled === true;
+    document.getElementById('CHANNEL_LABEL').value = cfg.label ?? '';
+    document.getElementById('CHANNEL_UNIT').value = cfg.unit ?? '';
+    document.getElementById('CHANNEL_SIGNAL_TYPE').value = cfg.signal_type ?? 'SingleEnded';
+    document.getElementById('CHANNEL_VALUE_RANGE').value = cfg.value_range ?? 'V_0To5';
+    document.getElementById('SCALE_ENABLED').checked = scale.enabled === true;
+    document.getElementById('SCALE_REVISION').value = scale.revision ?? '';
+    document.getElementById('SCALE_LOW_VOLTAGE').value = scale.low_voltage ?? 0;
+    document.getElementById('SCALE_HIGH_VOLTAGE').value = scale.high_voltage ?? 5;
+    document.getElementById('SCALE_LOW_VALUE').value = scale.low_value ?? 0;
+    document.getElementById('SCALE_HIGH_VALUE').value = scale.high_value ?? 100;
     toggleScalingFields();
 }
 
 // Save inputs back to active channel configuration in memory
 function saveInputsToScaleChannel(ch) {
-    scaleConfigs[ch] = {
-        enabled: document.getElementById('SCALE_ENABLED').checked,
-        low_voltage: parseFloat(document.getElementById('SCALE_LOW_VOLTAGE').value) || 0.0,
-        high_voltage: parseFloat(document.getElementById('SCALE_HIGH_VOLTAGE').value) || 10.0,
-        low_value: parseFloat(document.getElementById('SCALE_LOW_VALUE').value) || 0.0,
-        high_value: parseFloat(document.getElementById('SCALE_HIGH_VALUE').value) || 100.0
+    const previous = channelConfigs[ch] || {};
+    const number = id => Number(document.getElementById(id).value);
+    channelConfigs[ch] = {...previous,
+        enabled: document.getElementById('CHANNEL_ENABLED').checked,
+        label: document.getElementById('CHANNEL_LABEL').value.trim(),
+        unit: document.getElementById('CHANNEL_UNIT').value.trim(),
+        signal_type: document.getElementById('CHANNEL_SIGNAL_TYPE').value,
+        value_range: document.getElementById('CHANNEL_VALUE_RANGE').value,
+        scale: {...(previous.scale || {}), enabled: document.getElementById('SCALE_ENABLED').checked,
+            revision: document.getElementById('SCALE_REVISION').value.trim(),
+            low_voltage: number('SCALE_LOW_VOLTAGE'), high_voltage: number('SCALE_HIGH_VOLTAGE'),
+            low_value: number('SCALE_LOW_VALUE'), high_value: number('SCALE_HIGH_VALUE')}
     };
 }
 

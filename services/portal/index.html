@@ -3,180 +3,64 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MDDP Data Ingestion Control Center</title>
-    <!-- Outfit Font & Monospace -->
+    <meta name="theme-color" content="#f4f6f8">
+    <title>MDDP | Data systems</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="dashboard-container">
-        <!-- Header -->
-        <header class="main-header">
-            <div class="brand">
-                <div class="logo-icon">
-                    <svg viewBox="0 0 24 24" width="20" height="20">
-                        <path fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
-                    </svg>
-                </div>
-                <div class="brand-text">
-                    <h1>MDDP DATA INGESTION CONTROL CENTER</h1>
-                    <span class="sub-text">DISTRIBUTED HARDWARE GATEWAY SYSTEM</span>
-                </div>
-            </div>
-            <div class="header-status">
-                <div class="status-indicator">
-                    <span class="pulse-dot green"></span>
-                    <span class="status-label">SYS_ONLINE</span>
-                </div>
-                <div class="clock-display" id="realtime-clock">--:--:--</div>
+    <div class="shell">
+        <header class="topbar">
+            <a class="brand" href="#top" aria-label="MDDP systems home">
+                <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M16 3 4 9.5v13L16 29l12-6.5v-13L16 3Z"/><path d="m4.5 9.7 11.5 6.5 11.5-6.5M16 16.5V29M10 6.3l12 6.6"/></svg></span>
+                <span class="brand-copy"><strong>MDDP</strong><small>DATA INGESTION</small></span>
+            </a>
+            <div class="topbar-right">
+                <time id="realtime-clock" class="clock-display">--:--:--</time>
             </div>
         </header>
 
-        <!-- System Overview Section -->
-        <section class="system-overview">
-            <div class="overview-info">
-                <h2>PORTAL OVERVIEW</h2>
-                <p>Gateway node routing requests to isolated telemetry services. Devices are partitioned onto dedicated network ports to scale resource allocation and insulate control threads.</p>
-            </div>
-            <div class="system-stats">
-                <div class="stat-card">
-                    <span class="stat-title">SYS RUNTIME</span>
-                    <span class="stat-value monospace" id="uptime-counter">00:00:00</span>
+        <main id="top">
+            <section class="intro" aria-labelledby="page-title">
+                <div class="intro-copy">
+                    <div class="eyebrow"><span>CONTROL CENTER</span></div>
+                    <h1 id="page-title">Data ingestion</h1>
                 </div>
-                <div class="stat-card">
-                    <span class="stat-title">ACTIVE PORTS</span>
-                    <span class="stat-value monospace" id="active-tasks-count">0 / 3 ONLINE</span>
+            </section>
+
+            <section class="services-section" aria-labelledby="services-title">
+                <div class="section-heading">
+                    <div><h2 id="services-title">Services</h2></div>
                 </div>
-            </div>
-        </section>
-
-        <!-- Main Modules List (Horizontal List Rows) -->
-        <main class="modules-list">
-            <!-- 1. DAQ Module Row (Port 8081) -->
-            <a href="#" data-port="8081" class="module-portal-link" target="_blank" rel="noopener noreferrer">
-                <div class="module-row" id="row-daq">
-                    <div class="row-brand">
-                        <div class="module-icon">
-                            <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
-                            </svg>
-                        </div>
-                        <div class="brand-info">
-                            <h3>DAQ USB-4716</h3>
-                            <span class="status-badge badge-offline">
-                                <span class="badge-dot"></span>
-                                PORT_8081: OFFLINE
-                            </span>
-                        </div>
-                    </div>
-                    
-                    <div class="row-desc">
-                        <p>High-speed analog-to-digital signal streaming pipeline. Controls hardware clock rates, buffer allocation, and TimescaleDB synchronization.</p>
-                    </div>
-
-                    <div class="action-btn">
-                        <span>LAUNCH PANEL</span>
-                        <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                            <line x1="7" y1="17" x2="17" y2="7"></line>
-                            <polyline points="7 7 17 7 17 17"></polyline>
-                        </svg>
-                    </div>
+                <div class="modules-list">
+                    <a href="#" data-port="8081" class="module-portal-link" target="_blank" rel="noopener noreferrer" aria-label="Open DAQ USB-4716 panel">
+                        <article class="module-row" id="row-daq">
+                            <div class="card-heading"><span class="module-icon icon-daq"><svg viewBox="0 0 24 24" fill="none"><path d="M22 12h-4l-3 9L9 3l-3 9H2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="card-index">01 <i> / 03</i></span></div>
+                            <div class="card-body"><h3>DAQ USB-4716</h3></div>
+                            <div class="card-foot"><span class="status-badge badge-offline"><span class="badge-dot"></span>PORT_8081: OFFLINE</span><span class="action-btn"><span>Open service</span><svg viewBox="0 0 24 24" fill="none"><path d="M7 17 17 7M7 7h10v10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></div>
+                        </article>
+                    </a>
+                    <a href="#" data-port="8082" class="module-portal-link" target="_blank" rel="noopener noreferrer" aria-label="Open Musashi II panel">
+                        <article class="module-row" id="row-musashi-ii">
+                            <div class="card-heading"><span class="module-icon icon-m2"><svg viewBox="0 0 24 24" fill="none"><rect x="5" y="2" width="14" height="6" rx="1"/><path d="M12 8v11M8 12h8M12 19l-2 3h4l-2-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="card-index">02 <i> / 03</i></span></div>
+                            <div class="card-body"><h3>Musashi II</h3></div>
+                            <div class="card-foot"><span class="status-badge badge-offline"><span class="badge-dot"></span>PORT_8082: OFFLINE</span><span class="action-btn"><span>Open service</span><svg viewBox="0 0 24 24" fill="none"><path d="M7 17 17 7M7 7h10v10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></div>
+                        </article>
+                    </a>
+                    <a href="#" data-port="8083" class="module-portal-link" target="_blank" rel="noopener noreferrer" aria-label="Open Musashi IV panel">
+                        <article class="module-row" id="row-musashi-iv">
+                            <div class="card-heading"><span class="module-icon icon-m4"><svg viewBox="0 0 24 24" fill="none"><rect x="2" y="5" width="20" height="5" rx="1"/><path d="M6 10v9m12-9v9m-6-9v5M6 19l-1 3h2l-1-3m12 0-1 3h2l-1-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="card-index">03 <i> / 03</i></span></div>
+                            <div class="card-body"><h3>Musashi IV</h3></div>
+                            <div class="card-foot"><span class="status-badge badge-offline"><span class="badge-dot"></span>PORT_8083: OFFLINE</span><span class="action-btn"><span>Open service</span><svg viewBox="0 0 24 24" fill="none"><path d="M7 17 17 7M7 7h10v10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></div>
+                        </article>
+                    </a>
                 </div>
-            </a>
-
-            <!-- 2. Musashi II Module Row (Port 8082) -->
-            <a href="#" data-port="8082" class="module-portal-link" target="_blank" rel="noopener noreferrer">
-                <div class="module-row" id="row-musashi-ii">
-                    <div class="row-brand">
-                        <div class="module-icon">
-                            <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                                <rect x="5" y="2" width="14" height="6" rx="1" />
-                                <path d="M12 8v11M8 12h8M12 19l-2 3h4l-2-3" />
-                            </svg>
-                        </div>
-                        <div class="brand-info">
-                            <h3>MUSASHI II</h3>
-                            <span class="status-badge badge-offline">
-                                <span class="badge-dot"></span>
-                                PORT_8082: OFFLINE
-                            </span>
-                        </div>
-                    </div>
-
-                    <div class="row-desc">
-                        <p>Fluid dispenser module controller. Manages pressure configurations, digital calibration levels, and syringe fluid volumes.</p>
-                    </div>
-
-                    <div class="action-btn">
-                        <span>LAUNCH PANEL</span>
-                        <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                            <line x1="7" y1="17" x2="17" y2="7"></line>
-                            <polyline points="7 7 17 7 17 17"></polyline>
-                        </svg>
-                    </div>
-                </div>
-            </a>
-
-            <!-- 3. Musashi IV Module Row (Port 8083) -->
-            <a href="#" data-port="8083" class="module-portal-link" target="_blank" rel="noopener noreferrer">
-                <div class="module-row" id="row-musashi-iv">
-                    <div class="row-brand">
-                        <div class="module-icon">
-                            <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                                <rect x="2" y="5" width="20" height="5" rx="1" />
-                                <path d="M6 10v9M18 10v9M12 10v5M6 19l-1 3h2l-1-3M18 19l-1 3h2l-1-3" />
-                            </svg>
-                        </div>
-                        <div class="brand-info">
-                            <h3>MUSASHI IV</h3>
-                            <span class="status-badge badge-offline">
-                                <span class="badge-dot"></span>
-                                PORT_8083: OFFLINE
-                            </span>
-                        </div>
-                    </div>
-
-                    <div class="row-desc">
-                        <p>High-precision dual-nozzle dispenser robot panel. Handles automated micro-dispensation profiles, coordinates, and paths.</p>
-                    </div>
-
-                    <div class="action-btn">
-                        <span>LAUNCH PANEL</span>
-                        <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                            <line x1="7" y1="17" x2="17" y2="7"></line>
-                            <polyline points="7 7 17 7 17 17"></polyline>
-                        </svg>
-                    </div>
-                </div>
-            </a>
+            </section>
         </main>
-        <script>
-            // Immediate inline URL resolver: sets dynamic host URLs before DOMContentLoaded to prevent localhost routing on LAN
-            (function() {
-                try {
-                    var proto = (window.location.protocol === 'https:') ? 'https:' : 'http:';
-                    var host = window.location.hostname || '127.0.0.1';
-                    var links = document.querySelectorAll('.module-portal-link[data-port]');
-                    for (var i = 0; i < links.length; i++) {
-                        var port = links[i].getAttribute('data-port');
-                        if (port) {
-                            links[i].href = proto + '//' + host + ':' + port;
-                        }
-                    }
-                } catch (e) {
-                    console.error('Immediate URL resolution error:', e);
-                }
-            })();
-        </script>        
     </div>
-
-    <!-- Notification Toast Element -->
-    <div id="toast" class="toast">
-        <span id="toast-message">Notification message</span>
-    </div>
-
+    <div id="toast" class="toast"><span id="toast-message">Notification message</span></div>
     <script src="app.js"></script>
 </body>
 </html>
