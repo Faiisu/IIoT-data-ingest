@@ -18,6 +18,7 @@ import time
 import signal
 import tempfile
 import math
+import uuid
 from pathlib import Path
 from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO, emit
@@ -61,6 +62,7 @@ CONFIG_PATH = os.path.join(SERVICE_DIR, 'config.json')
 PID_PATH = os.path.join(SERVICE_DIR, '.daq_process.pid')
 MODE_PATH = os.path.join(SERVICE_DIR, '.daq_process.mode')
 LOG_PATH = os.path.join(SERVICE_DIR, 'daq_pipeline.log')
+PROC_ROOT = Path('/proc')
 
 # Global monitoring variables
 tail_thread = None
@@ -177,6 +179,46 @@ def is_pid_running(pid):
         except (OSError, ProcessLookupError):
             return False
 
+def acquisition_mode_for_pid(pid):
+    """Identify a process launched by this service from its exact command arguments."""
+    if not is_pid_running(pid):
+        return None
+    if sys.platform == 'win32':
+        return None
+    try:
+        arguments = (PROC_ROOT / str(pid) / 'cmdline').read_bytes().split(b'\0')
+    except OSError:
+        return None
+    if len(arguments) < 2:
+        return None
+    script = arguments[1].decode(errors='replace')
+    if script == os.path.join(CORE_DIR, 'mockup_stream_to_db.py'):
+        return 'mockup'
+    if script == os.path.join(CORE_DIR, 'stream_to_db.py'):
+        for index, argument in enumerate(arguments[:-1]):
+            if argument == b'--config' and arguments[index + 1] == os.fsencode(CONFIG_PATH):
+                return 'production'
+    return None
+
+
+def find_acquisition_child():
+    """Recover a live acquisition child when its PID file was overwritten."""
+    if sys.platform == 'win32':
+        return None, None
+    try:
+        tasks = (PROC_ROOT / 'self' / 'task').iterdir()
+        children = set()
+        for task in tasks:
+            children.update(int(pid) for pid in (task / 'children').read_text().split())
+    except (OSError, ValueError):
+        return None, None
+    for pid in sorted(children):
+        mode = acquisition_mode_for_pid(pid)
+        if mode:
+            return pid, mode
+    return None, None
+
+
 # Retrieve the running process info if active
 def get_running_process():
     if os.path.exists(PID_PATH) and os.path.exists(MODE_PATH):
@@ -186,14 +228,15 @@ def get_running_process():
             with open(MODE_PATH, 'r') as f:
                 mode = f.read().strip()
             
-            if is_pid_running(pid):
-                command_path = f'/proc/{pid}/cmdline'
-                script = 'mockup_stream_to_db.py' if mode == 'mockup' else 'stream_to_db.py'
-                if sys.platform == 'win32' or (os.path.exists(command_path) and
-                    script.encode() in Path(command_path).read_bytes()):
-                    return pid, mode
+            if (sys.platform == 'win32' and is_pid_running(pid)) or acquisition_mode_for_pid(pid) == mode:
+                return pid, mode
         except Exception as e:
             print(f"Error checking active PID file: {e}")
+    pid, mode = find_acquisition_child()
+    if pid is not None:
+        Path(PID_PATH).write_text(str(pid), encoding='utf-8')
+        Path(MODE_PATH).write_text(mode, encoding='utf-8')
+        return pid, mode
     return None, None
 
 # Terminate process by PID cross-platform
@@ -302,29 +345,35 @@ def get_last_logs(count=50):
         return []
 
 def scan_host_usb_devices():
-    """Scans host PC for connected Advantech DAQ cards, USB-serial ports, and USB devices."""
+    """Scan installed Advantech DAQ cards and serial ports on this host."""
     detected = []
+    warnings = []
 
-    # 1. Advantech DAQNavi SDK Enumeration
+    # Use the installed DAQNavi enumerator so the device ID matches acquisition.
     try:
-        sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
-        from Automation.BDaq import WaveformAiCtrl
-        installed_devices = WaveformAiCtrl.getInstalledDevices()
-        for dev in installed_devices:
-            dev_desc = getattr(dev, 'Description', str(dev))
-            board_num = getattr(dev, 'BoardNumber', 0)
+        result = subprocess.run(
+            ['/opt/advantech/tools/dev_enum'],
+            capture_output=True, text=True, timeout=5, check=True,
+        )
+        for line in result.stdout.splitlines():
+            row = re.match(r'^\|\s*\d+\s*\|\s*\d+\s*\|\s*([^|]+?)\s*\|', line)
+            if not row:
+                continue
+            description = row.group(1).strip()
+            board_id = re.search(r'BID#\d+', description)
             detected.append({
-                'id': dev_desc,
-                'name': f"Advantech {dev_desc}",
+                'id': description,
+                'name': f"Advantech {description}",
                 'type': 'Advantech DAQ Card',
-                'port': f"BID#{board_num}",
+                'port': board_id.group(0) if board_id else '',
                 'vendor': 'Advantech',
                 'is_daq': True
             })
-    except Exception as e:
-        print(f"[SCAN] Advantech SDK scan note: {e}")
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"[SCAN] Advantech device enumeration failed: {exc}")
+        warnings.append('Advantech DAQ scan failed; check that DAQNavi is installed and the device is accessible.')
 
-    # 2. USB Serial & COM Ports via PySerial
+    # Serial ports may contain devices outside the Advantech DAQNavi driver.
     try:
         import serial.tools.list_ports
         ports = serial.tools.list_ports.comports()
@@ -340,27 +389,9 @@ def scan_host_usb_devices():
                 'hwid': p.hwid if hasattr(p, 'hwid') else '',
                 'is_daq': False
             })
-    except Exception as e:
-        print(f"[SCAN] Serial ports scan note: {e}")
-
-    # 3. Default Hardware & Simulation Fallbacks
-    detected.append({
-        'id': 'USB-4716,BID#0',
-        'name': 'USB-4716 Default Board (BID#0)',
-        'type': 'Advantech DAQ Default',
-        'port': 'BID#0',
-        'vendor': 'Advantech',
-        'is_daq': True
-    })
-
-    detected.append({
-        'id': 'USB-4716 (Mockup Mode)',
-        'name': 'USB-4716 Virtual Hardware (Driverless Simulation)',
-        'type': 'Mockup / Driverless',
-        'port': 'Virtual',
-        'vendor': 'Software Mock',
-        'is_daq': True
-    })
+    except Exception as exc:
+        print(f"[SCAN] Serial port scan failed: {exc}")
+        warnings.append('Serial port scan failed.')
 
     # Deduplicate by 'id' while retaining order
     seen = set()
@@ -370,7 +401,7 @@ def scan_host_usb_devices():
             seen.add(d['id'])
             unique_detected.append(d)
 
-    return unique_detected
+    return unique_detected, warnings
 
 @app.route('/')
 def home():
@@ -455,52 +486,135 @@ def get_retention():
         return jsonify({'saved_days': config.get('DB_RETENTION_DAYS'),
                         'message': f'Could not read retention policy: {exc}'}), 503
 
+def _test_destination(settings):
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    saved = read_config()
+    value = lambda key, default='': settings[key] if key in settings else saved.get(key, default)
+    destination = settings.get('DESTINATION', settings.get('destination', saved.get('DESTINATION', 'postgresql')))
+
+    if destination in ('postgresql', 'timescaledb', 'database'):
+        import psycopg2
+
+        dsn = value('DB_DSN')
+        if dsn:
+            connection = psycopg2.connect(dsn, connect_timeout=3)
+        else:
+            connection = psycopg2.connect(
+                host=value('DB_HOST', 'localhost'), port=value('DB_PORT', 5432),
+                user=value('DB_USER', 'admin'), password=value('DB_PASSWORD'),
+                dbname=value('DB_NAME', 'daq_db'), connect_timeout=3,
+            )
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute('SELECT 1')
+                cursor.fetchone()
+        finally:
+            connection.close()
+        return 'PostgreSQL connection and query succeeded. No sample data was written.'
+
+    if destination == 'influxdb':
+        url = str(value('INFLUX_URL')).rstrip('/')
+        org = str(value('INFLUX_ORG'))
+        bucket = str(value('INFLUX_BUCKET'))
+        token = str(value('INFLUX_TOKEN'))
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+            raise ValueError('Enter a valid InfluxDB HTTP(S) URL.')
+        if not org or not bucket or not token:
+            raise ValueError('InfluxDB organization, bucket, and token are required.')
+        headers = {'Authorization': f'Token {token}', 'Accept': 'application/json'}
+
+        def get_resource(path, query):
+            target = f"{url}{path}?{urllib.parse.urlencode(query)}"
+            probe = urllib.request.Request(target, headers=headers, method='GET')
+            try:
+                with urllib.request.urlopen(probe, timeout=4.0) as response:
+                    return json.load(response)
+            except urllib.error.HTTPError as exc:
+                if exc.code in (401, 403):
+                    raise ValueError(
+                        f'InfluxDB denied metadata access (HTTP {exc.code}). '
+                        'Check the token and grant read access to organizations and buckets.'
+                    ) from exc
+                raise
+
+        orgs = get_resource('/api/v2/orgs', {'org': org}).get('orgs', [])
+        selected_org = next((entry for entry in orgs if entry.get('name') == org), None)
+        if not selected_org:
+            raise ValueError('InfluxDB organization is unavailable to this token.')
+        buckets = get_resource('/api/v2/buckets', {'name': bucket, 'orgID': selected_org['id']}).get('buckets', [])
+        if not any(entry.get('name') == bucket and entry.get('orgID') == selected_org['id'] for entry in buckets):
+            raise ValueError('InfluxDB bucket is unavailable to this token.')
+        return 'InfluxDB connection, token, organization, and bucket verified. No sample data was written.'
+
+    if destination == 'mqtt':
+        import paho.mqtt.client as mqtt
+
+        broker = str(value('MQTT_BROKER'))
+        if not broker:
+            raise ValueError('MQTT broker host is required.')
+        port = int(value('MQTT_PORT', 1883))
+        if not 1 <= port <= 65535:
+            raise ValueError('MQTT port must be between 1 and 65535.')
+        client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            client_id=f'daq-connection-test-{uuid.uuid4().hex[:8]}',
+            reconnect_on_failure=False,
+        )
+        client.connect_timeout = 4.0
+        username = value('MQTT_USERNAME')
+        if username:
+            client.username_pw_set(username, value('MQTT_PASSWORD'))
+        if value('MQTT_TLS_ENABLED', False):
+            client.tls_set(
+                ca_certs=value('MQTT_CA_CERTS') or None,
+                certfile=value('MQTT_CLIENT_CERT') or None,
+                keyfile=value('MQTT_CLIENT_KEY') or None,
+            )
+        connected = threading.Event()
+        result = {'reason': None}
+
+        def on_connect(_client, _userdata, _flags, reason_code, _properties):
+            result['reason'] = reason_code
+            connected.set()
+
+        client.on_connect = on_connect
+        loop_started = False
+        try:
+            rc = client.connect(broker, port, keepalive=10)
+            if rc != mqtt.MQTT_ERR_SUCCESS:
+                raise ConnectionError(f'MQTT transport error: {mqtt.error_string(rc)}')
+            client.loop_start()
+            loop_started = True
+            if not connected.wait(4.0):
+                raise TimeoutError('MQTT broker did not acknowledge the connection.')
+            if result['reason'] != 0:
+                raise ConnectionError(f'MQTT broker refused the connection: {result["reason"]}')
+        finally:
+            if loop_started:
+                client.loop_stop()
+            client.disconnect()
+        return 'MQTT broker accepted the connection. No message was published.'
+
+    raise ValueError('Unsupported destination.')
+
+
+@app.route('/api/test_destination', methods=['POST'])
 @app.route('/api/test_db', methods=['POST'])
-def test_db():
-    req = request.get_json() or {}
-    cfg = read_config()
-    dest = req.get('DESTINATION') or req.get('destination') or cfg.get('DESTINATION', 'postgresql')
-
-    if dest == 'influxdb':
-        url = req.get('INFLUX_URL') or cfg.get('INFLUX_URL', 'http://localhost:8086')
-        token = req.get('INFLUX_TOKEN') or cfg.get('INFLUX_TOKEN', '')
-        org = req.get('INFLUX_ORG') or cfg.get('INFLUX_ORG', 'mddp')
-        bucket = req.get('INFLUX_BUCKET') or cfg.get('INFLUX_BUCKET', 'daq_telemetry')
-
-        target_url = f"{url.rstrip('/')}/health"
-        headers = {"User-Agent": "USB4716-TestClient"}
-        if token:
-            headers["Authorization"] = f"Token {token}"
-
-        try:
-            import urllib.request
-            req_obj = urllib.request.Request(target_url, headers=headers, method="GET")
-            with urllib.request.urlopen(req_obj, timeout=4.0) as resp:
-                if resp.status in (200, 204):
-                    return jsonify({'success': True, 'message': f'InfluxDB server at {url} is HEALTHY! (Org: {org}, Bucket: {bucket})'})
-                else:
-                    return jsonify({'success': False, 'message': f'InfluxDB returned HTTP status {resp.status}'})
-        except Exception as e:
-            return jsonify({'success': False, 'message': f'InfluxDB connection error: {str(e)}'})
-    elif dest == 'mqtt':
-        return jsonify({'success': True, 'message': 'MQTT Broker target configured.'})
-    else:
-        dsn = req.get('DB_DSN') or cfg.get('DB_DSN')
-        if not dsn:
-            host = req.get('DB_HOST') or cfg.get('DB_HOST', 'localhost')
-            port = req.get('DB_PORT') or cfg.get('DB_PORT', 5432)
-            user = req.get('DB_USER') or cfg.get('DB_USER', 'admin')
-            password = req.get('DB_PASSWORD') or cfg.get('DB_PASSWORD', 'admin')
-            dbname = req.get('DB_NAME') or cfg.get('DB_NAME', 'daq_db')
-            dsn = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
-
-        try:
-            import psycopg2
-            conn = psycopg2.connect(dsn, connect_timeout=3)
-            conn.close()
-            return jsonify({'success': True, 'message': 'PostgreSQL/TimescaleDB connection successful!'})
-        except Exception as e:
-            return jsonify({'success': False, 'message': f'PostgreSQL connection error: {str(e)}'})
+def test_destination():
+    settings = request.get_json(silent=True)
+    if not isinstance(settings, dict):
+        return jsonify({'success': False, 'message': 'Request must be a JSON object.'}), 400
+    try:
+        message = _test_destination(settings)
+        return jsonify({'success': True, 'message': message})
+    except (ValueError, TypeError) as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'success': False, 'message': f'Connection failed: {exc}'}), 502
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
@@ -603,13 +717,14 @@ def get_samples():
 
 @app.route('/api/scan_usb', methods=['GET'])
 def api_scan_usb():
-    """Returns JSON list of detected USB and DAQ hardware devices on the host PC."""
-    devices = scan_host_usb_devices()
+    """Return installed DAQ hardware and serial ports on the host PC."""
+    devices, warnings = scan_host_usb_devices()
     return jsonify({
-        'status': 'success',
+        'status': 'error' if warnings and not devices else 'success',
         'count': len(devices),
-        'devices': devices
-    })
+        'devices': devices,
+        'warnings': warnings,
+    }), 503 if warnings and not devices else 200
 
 
 @socketio.on('connect')

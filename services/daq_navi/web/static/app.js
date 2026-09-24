@@ -6,6 +6,7 @@ if (typeof io !== 'undefined') {
 }
 let channelConfigs = {};
 let currentScaleChannel = '0';
+let destinationTestGeneration = 0;
 
 document.addEventListener('DOMContentLoaded', () => {
     updateClock();
@@ -23,11 +24,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('SCALE_ENABLED').addEventListener('change', toggleScalingFields);
     document.getElementById('SCALE_CHANNEL_TARGET').addEventListener('change', handleScaleChannelTargetChange);
+    document.getElementById('CHANNEL_SIGNAL_TYPE').addEventListener('change', updateSignalTypeHelp);
+    document.getElementById('DEVICE_DESCRIPTION').addEventListener('input', updateSignalTypeHelp);
     document.getElementById('graph-channel').addEventListener('change', refreshProductionGraphs);
     const destEl = document.getElementById('DESTINATION');
     if (destEl) {
         destEl.addEventListener('change', toggleDestinationFields);
     }
+    document.getElementById('test-destination-btn').addEventListener('click', testDestinationConnection);
+    const outputSection = document.getElementById('config-output');
+    const clearConnectionResult = () => {
+        destinationTestGeneration += 1;
+        const result = document.getElementById('destination-test-result');
+        result.textContent = '';
+        result.className = 'destination-test-result';
+    };
+    outputSection.addEventListener('input', clearConnectionResult);
+    outputSection.addEventListener('change', clearConnectionResult);
     const tlsEl = document.getElementById('MQTT_TLS_ENABLED');
     if (tlsEl) {
         tlsEl.addEventListener('change', toggleTlsFields);
@@ -92,7 +105,7 @@ async function handleScanUsbDevices() {
     scanBtn.classList.add('scanning');
     const loading = document.createElement('div');
     loading.className = 'scan-loading';
-    loading.textContent = 'Scanning host USB bus and DAQ ports…';
+    loading.textContent = 'Scanning DAQ devices and serial ports…';
     menu.replaceChildren(loading);
     menu.classList.remove('hidden');
 
@@ -135,6 +148,7 @@ async function handleScanUsbDevices() {
                     const devInput = document.getElementById('DEVICE_DESCRIPTION');
                     if (devInput) {
                         devInput.value = dev.id;
+                        updateSignalTypeHelp();
                         devInput.classList.add('highlight-flash');
                         setTimeout(() => devInput.classList.remove('highlight-flash'), 1200);
                         devInput.focus();
@@ -146,6 +160,13 @@ async function handleScanUsbDevices() {
                 menu.appendChild(item);
             });
 
+            if (data.warnings?.length) {
+                const warning = document.createElement('div');
+                warning.className = 'scan-error';
+                warning.textContent = data.warnings.join(' ');
+                menu.appendChild(warning);
+            }
+
             close.addEventListener('click', () => {
                 menu.classList.add('hidden');
                 scanBtn.focus();
@@ -153,14 +174,16 @@ async function handleScanUsbDevices() {
         } else {
             const empty = document.createElement('div');
             empty.className = 'scan-empty';
-            empty.textContent = 'No USB/DAQ devices detected on host PC.';
+            empty.textContent = data.warnings?.length
+                ? data.warnings.join(' ')
+                : 'No DAQ devices or serial ports detected on host PC.';
             menu.replaceChildren(empty);
         }
     } catch (err) {
-        console.error('Error scanning USB devices:', err);
+        console.error('Error scanning devices:', err);
         const error = document.createElement('div');
         error.className = 'scan-error';
-        error.textContent = `Failed to scan USB ports: ${err.message}`;
+        error.textContent = `Failed to scan devices: ${err.message}`;
         menu.replaceChildren(error);
     } finally {
         scanBtn.classList.remove('scanning');
@@ -247,6 +270,49 @@ function toggleDestinationFields() {
     }
 }
 
+async function testDestinationConnection() {
+    const button = document.getElementById('test-destination-btn');
+    const result = document.getElementById('destination-test-result');
+    const destination = document.getElementById('DESTINATION').value;
+    const generation = destinationTestGeneration;
+    const fields = {
+        postgresql: ['DB_DSN', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'],
+        influxdb: ['INFLUX_URL', 'INFLUX_ORG', 'INFLUX_BUCKET', 'INFLUX_TOKEN'],
+        mqtt: ['MQTT_BROKER', 'MQTT_PORT', 'MQTT_USERNAME', 'MQTT_PASSWORD',
+            'MQTT_TLS_ENABLED', 'MQTT_CA_CERTS', 'MQTT_CLIENT_CERT', 'MQTT_CLIENT_KEY'],
+    };
+    const settings = {DESTINATION: destination};
+    for (const id of fields[destination] || []) {
+        const input = document.getElementById(id);
+        settings[id] = input.type === 'checkbox' ? input.checked : input.value.trim();
+    }
+
+    button.disabled = true;
+    button.textContent = 'Testing…';
+    result.textContent = 'Connecting to the selected destination…';
+    result.className = 'destination-test-result checking';
+    try {
+        const response = await fetch('/api/test_destination', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(settings),
+        });
+        const data = await response.json();
+        if (generation === destinationTestGeneration) {
+            result.textContent = data.message || 'Connection test failed.';
+            result.className = `destination-test-result ${response.ok && data.success ? 'success' : 'error'}`;
+        }
+    } catch (error) {
+        if (generation === destinationTestGeneration) {
+            result.textContent = `Connection test failed: ${error.message}`;
+            result.className = 'destination-test-result error';
+        }
+    } finally {
+        button.disabled = false;
+        button.textContent = 'Test connection';
+    }
+}
+
 function syncPostgresDsn() {
     const host = document.getElementById('DB_HOST')?.value.trim() || 'localhost';
     const port = document.getElementById('DB_PORT')?.value.trim() || '5432';
@@ -304,6 +370,7 @@ async function loadConfig() {
         currentScaleChannel = '0';
         document.getElementById('SCALE_CHANNEL_TARGET').value = '0';
         loadScaleChannelToInputs(currentScaleChannel);
+        updateSignalTypeHelp();
         toggleDestinationFields();
         toggleTlsFields();
         
@@ -444,6 +511,13 @@ async function handleConfigSave(e) {
         });
         
         const saved = await res.json();
+        if (!res.ok && saved.config) {
+            await loadConfig();
+            await checkProcessStatus();
+            showToast(saved.message || 'Saved, but acquisition did not restart.', true);
+            appendLog('ERROR', `Configuration saved; acquisition needs attention: ${saved.message}`);
+            return;
+        }
         if (!res.ok) throw new Error(saved.message || 'Failed to save');
         showToast(`Saved. Raw retention: ${saved.retention_days} days.`);
         appendLog('SUCCESS', 'Configuration changes committed to config.json.');
@@ -569,6 +643,7 @@ function loadScaleChannelToInputs(ch) {
     document.getElementById('CHANNEL_UNIT').value = cfg.unit ?? '';
     document.getElementById('CHANNEL_SIGNAL_TYPE').value = cfg.signal_type ?? 'SingleEnded';
     document.getElementById('CHANNEL_VALUE_RANGE').value = cfg.value_range ?? 'V_0To5';
+    updateSignalTypeHelp();
     document.getElementById('SCALE_ENABLED').checked = scale.enabled === true;
     document.getElementById('SCALE_REVISION').value = scale.revision ?? '';
     document.getElementById('SCALE_LOW_VOLTAGE').value = scale.low_voltage ?? 0;
@@ -598,6 +673,30 @@ function handleScaleChannelTargetChange(e) {
     saveInputsToScaleChannel(currentScaleChannel);
     currentScaleChannel = e.target.value;
     loadScaleChannelToInputs(currentScaleChannel);
+}
+
+function updateSignalTypeHelp() {
+    const device = document.getElementById('DEVICE_DESCRIPTION').value.trim();
+    const channel = Number(document.getElementById('SCALE_CHANNEL_TARGET').value);
+    const select = document.getElementById('CHANNEL_SIGNAL_TYPE');
+    const help = document.getElementById('signal-type-help');
+    const pci1716 = /^PCI-1716(?:H|L)?(?:,|$)/i.test(device);
+    select.querySelector('option[value="PseudoDifferential"]').disabled = pci1716;
+    if (pci1716 && select.value === 'PseudoDifferential') {
+        help.textContent = 'Pseudo differential is unavailable on PCI-1716. Choose another signal type.';
+    } else if (select.value === 'Differential') {
+        help.textContent = !pci1716
+            ? 'Check the selected DAQ model manual for differential wiring.'
+            : channel % 2
+                ? `Differential uses an even channel. Select channel ${channel - 1} for AI${channel - 1}/AI${channel}.`
+                : `Wire signal + to AI${channel} and signal − to AI${channel + 1}; the paired channel cannot be another sensor.`;
+    } else if (select.value === 'SingleEnded') {
+        help.textContent = pci1716
+            ? `Wire signal + to AI${channel} and signal return to AGND.`
+            : 'Check the selected DAQ model manual for single ended wiring.';
+    } else {
+        help.textContent = 'Check the selected DAQ model manual for pseudo differential wiring.';
+    }
 }
 
 function resolveBackLink() {

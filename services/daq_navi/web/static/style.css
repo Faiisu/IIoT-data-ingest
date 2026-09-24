@@ -100,6 +100,18 @@ h1 { margin: 12px 0 8px; font: 600 clamp(30px, 3.2vw, 40px)/1.15 var(--display);
 .checkbox-group label { cursor: pointer; line-height: 1.5; }
 .custom-checkbox { width: 16px; height: 16px; flex: none; margin: 0; accent-color: var(--green); cursor: pointer; }
 .target-config-card { min-width: 0; padding: 17px; display: flex; flex-direction: column; gap: 15px; border: 1px solid var(--line); border-radius: 8px; background: #fafbf9; }
+.destination-test { padding: 15px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border: 1px solid #dcebe1; border-radius: 8px; background: var(--mint); }
+.destination-test strong { color: var(--ink); font: 700 12px/1.4 var(--display); }
+.destination-test p { margin: 3px 0 0; color: #64756a; font-size: 11px; line-height: 1.45; }
+.test-connection-btn { min-height: 37px; flex: none; padding: 8px 12px; border: 1px solid var(--green); border-radius: 6px; background: white; color: var(--green); font-size: 11px; font-weight: 700; }
+.test-connection-btn:hover:not(:disabled) { background: #dcefe7; }
+.test-connection-btn:disabled { opacity: .65; }
+.test-connection-btn:focus-visible { outline: 3px solid #a7d3bc; outline-offset: 2px; }
+.destination-test-result { min-height: 0; font-size: 11px; line-height: 1.5; }
+.destination-test-result:empty { display: none; }
+.destination-test-result.checking { color: var(--muted); }
+.destination-test-result.success { color: var(--green); }
+.destination-test-result.error { color: var(--red); }
 #influx-config-group, #mqtt-config-group, #mqtt-tls-group { display: none; }
 #mqtt-tls-group { flex-direction: column; gap: 12px; margin-top: 8px; }
 .tls-toggle { padding-top: 8px; }
@@ -186,6 +198,7 @@ h1 { margin: 12px 0 8px; font: 600 clamp(30px, 3.2vw, 40px)/1.15 var(--display);
     .config-nav a span { display: none; }
     .nav-save-btn { grid-column: 1 / -1; }
     .config-section { padding: 16px; }
+    .destination-test { align-items: stretch; flex-direction: column; }
     .panel-header h2 { font-size: 20px; }
     .flex-header { flex-direction: column; }
     .mode-select-wrap { width: 100%; }

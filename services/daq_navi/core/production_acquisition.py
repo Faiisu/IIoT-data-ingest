@@ -35,6 +35,7 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
+_WRITER_BATCH_GROUP = 8
 
 
 class AcquisitionFault(RuntimeError):
@@ -73,6 +74,7 @@ def validate_production_config(cfg):
         if channel.enabled and index not in selected_span:
             raise ValueError(f"enabled channel {index} is outside the configured DAQ span")
     enabled = []
+    pci_1716 = re.match(r'^PCI-1716(?:H|L)?(?:,|$)', cfg.DEVICE_DESCRIPTION, re.IGNORECASE)
     for index in range(cfg.START_CHANNEL, cfg.START_CHANNEL + cfg.CHANNEL_COUNT):
         channel = cfg.channels.get(index)
         raw_channel = cfg.raw.get("CHANNELS", {}).get(str(index))
@@ -80,14 +82,24 @@ def validate_production_config(cfg):
             raise ValueError(f"channel {index} configuration is required")
         if type(raw_channel.get("enabled")) is not bool:
             raise ValueError(f"channel {index} enabled must be a boolean")
-        if channel is None or not channel.enabled:
-            continue
-        enabled.append(index)
         for setting, enum in (("signal_type", AiSignalType), ("value_range", ValueRange)):
             name = raw_channel.get(setting)
             members = getattr(enum, "__members__", vars(enum))
             if not isinstance(name, str) or name not in members:
                 raise ValueError(f"channel {index} {setting} is invalid")
+        signal_type = raw_channel['signal_type']
+        if pci_1716:
+            if signal_type == 'PseudoDifferential':
+                raise ValueError(f"channel {index} PseudoDifferential is not supported by PCI-1716")
+            if channel.enabled and signal_type == 'Differential':
+                if index % 2:
+                    raise ValueError(f"channel {index} Differential must use an even-numbered channel")
+                other = cfg.channels.get(index + 1)
+                if other is not None and other.enabled:
+                    raise ValueError(f"channel {index + 1} cannot be enabled when channel {index} is Differential")
+        if channel is None or not channel.enabled:
+            continue
+        enabled.append(index)
         if not isinstance(raw_channel.get("label"), str):
             raise ValueError(f"channel {index} label is required")
         if not channel.label.strip():
@@ -185,22 +197,43 @@ class DurableSpool:
                 raise AcquisitionFault("buffer_unwritable") from exc
 
     def oldest(self):
+        batches = self.oldest_many(1)
+        return batches[0] if batches else None
+
+    def oldest_many(self, limit: int):
+        if limit < 1:
+            raise ValueError("batch limit must be positive")
         with self._lock:
             # The SQLite rowid records commit order. Wall time can step back
             # during NTP adjustment and must never reorder replay.
-            row = self.conn.execute("SELECT batch_id, payload FROM batches ORDER BY rowid LIMIT 1").fetchone()
-            if not row:
-                return None
-            return row[0], json.loads(zlib.decompress(row[1]))
+            batches = self.conn.execute(
+                "SELECT batch_id, payload FROM batches ORDER BY rowid LIMIT ?", (limit,)
+            ).fetchall()
+        return [(batch_id, json.loads(zlib.decompress(payload)))
+                for batch_id, payload in batches]
 
     def acknowledge(self, batch_id: str):
+        self.acknowledge_many([batch_id])
+
+    def acknowledge_many(self, batch_ids: list[str]):
+        if not batch_ids:
+            return
         with self._lock:
-            row = self.conn.execute("SELECT length(payload) FROM batches WHERE batch_id=?", (batch_id,)).fetchone()
-            self.conn.execute("DELETE FROM batches WHERE batch_id=?", (batch_id,))
-            self.conn.commit()
-            if row:
-                self._pending_count -= 1
-                self._pending_bytes -= row[0]
+            placeholders = ",".join("?" for _ in batch_ids)
+            try:
+                lengths = self.conn.execute(
+                    f"SELECT length(payload) FROM batches WHERE batch_id IN ({placeholders})",
+                    batch_ids,
+                ).fetchall()
+                self.conn.executemany(
+                    "DELETE FROM batches WHERE batch_id=?", ((batch_id,) for batch_id in batch_ids)
+                )
+                self.conn.commit()
+            except sqlite3.Error:
+                self.conn.rollback()
+                raise
+            self._pending_count -= len(lengths)
+            self._pending_bytes -= sum(length for (length,) in lengths)
             if self.pending_batches == 0:
                 self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
@@ -411,14 +444,16 @@ class ProductionPipeline:
             return len(rows)
 
     def flush_once(self):
-        pending = self.spool.oldest()
+        return self.flush_batches(1)
+
+    def flush_batches(self, limit: int):
+        pending = self.spool.oldest_many(limit)
         gaps = self.spool.pending_gaps()
         if not pending and not gaps:
             return False
-        batch_id, rows = pending if pending else (None, [])
+        rows = [row for _, batch_rows in pending for row in batch_rows]
         self.destination.write(rows, gaps)
-        if batch_id:
-            self.spool.acknowledge(batch_id)
+        self.spool.acknowledge_many([batch_id for batch_id, _ in pending])
         self.spool.acknowledge_gaps([gap["gap_id"] for gap in gaps])
         self.last_writer_error = None
         self.publish_status()
@@ -527,6 +562,11 @@ class AdvantechDaq:
         self.device.record.sectionLength = cfg.SECTION_LENGTH
         for index in range(cfg.START_CHANNEL, cfg.START_CHANNEL + cfg.CHANNEL_COUNT):
             ch = cfg.channels[index]
+            if (re.match(r'^PCI-1716(?:H|L)?(?:,|$)', cfg.DEVICE_DESCRIPTION, re.IGNORECASE)
+                    and index % 2 and not ch.enabled
+                    and cfg.channels[index - 1].signal_type_str == 'Differential'):
+                # The card configures the odd input as the differential negative leg.
+                continue
             self.device.channels[index].signalType = ch.signal_type
             self.device.channels[index].valueRange = ch.value_range
         if BioFailed(self.device.prepare()):
@@ -593,7 +633,7 @@ def run_production(cfg, stop_event=None, daq_factory=AdvantechDaq, destination=N
             and time.monotonic() < writer_deadline[0]
         ):
             try:
-                if not pipeline.flush_once():
+                if not pipeline.flush_batches(_WRITER_BATCH_GROUP):
                     writer_stop.wait(0.1)
             except Exception as exc:
                 writer_error.append(str(exc))

@@ -4,10 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from services.daq_navi.core.production_acquisition import (
     AcquisitionFault,
+    AdvantechDaq,
     DurableSpool,
     ProductionPipeline,
     run_production,
@@ -179,6 +180,46 @@ class ProductionAcquisitionTests(unittest.TestCase):
             self.assertEqual(restarted.pending_batches, 0)
             restarted.close()
 
+    def test_grouped_flush_commits_four_batches_and_keeps_the_next_one(self):
+        class RecordingDestination(FakeDestination):
+            def __init__(self):
+                super().__init__()
+                self.write_sizes = []
+
+            def write(self, rows, gaps):
+                self.write_sizes.append(len(rows))
+                super().write(rows, gaps)
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = RecordingDestination()
+            pipeline = ProductionPipeline(configuration(), Path(directory), destination,
+                                          session_id="test-session")
+            for index in range(5):
+                pipeline.capture([1, 2, 3, 4],
+                                 end_time_ns=1_700_000_000_000_000_000 + index * 500_000)
+            self.assertTrue(pipeline.flush_batches(4))
+            self.assertEqual(destination.write_sizes, [16])
+            self.assertEqual(pipeline.pending_batches, 1)
+            self.assertEqual(pipeline.spool.oldest()[0], "test-session:4")
+            pipeline.close()
+
+    def test_grouped_flush_replays_every_batch_after_uncertain_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = FakeDestination()
+            pipeline = ProductionPipeline(configuration(), Path(directory), destination,
+                                          session_id="test-session")
+            for index in range(3):
+                pipeline.capture([1, 2, 3, 4],
+                                 end_time_ns=1_700_000_000_000_000_000 + index * 500_000)
+            destination.uncertain = True
+            with self.assertRaises(ConnectionError):
+                pipeline.flush_batches(4)
+            self.assertEqual(pipeline.pending_batches, 3)
+            pipeline.flush_batches(4)
+            self.assertEqual(pipeline.pending_batches, 0)
+            self.assertEqual(len(destination.rows), 12)
+            pipeline.close()
+
     def test_late_read_does_not_retimestamp_continuous_samples(self):
         cfg = configuration()
         with tempfile.TemporaryDirectory() as directory:
@@ -299,6 +340,69 @@ class ProductionAcquisitionTests(unittest.TestCase):
                 raw["CHANNELS"]["2"][setting] = invalid
                 with self.assertRaisesRegex(ValueError, f"channel 2 {setting}"):
                     validate_production_config(DaqNaviConfig(raw))
+
+    def test_pci_1716_rejects_unsupported_and_conflicting_signal_types(self):
+        cases = (
+            (0, 'PseudoDifferential', 'PseudoDifferential'),
+            (1, 'Differential', 'even-numbered'),
+            (0, 'Differential', 'channel 1'),
+        )
+        for channel_number, signal_type, message in cases:
+            with self.subTest(channel=channel_number, signal_type=signal_type):
+                raw = configuration().raw
+                raw['DEVICE_DESCRIPTION'] = 'PCI-1716,BID#0'
+                raw['CHANNELS'][str(channel_number)]['signal_type'] = signal_type
+                with self.assertRaisesRegex(ValueError, message):
+                    validate_production_config(DaqNaviConfig(raw, allow_env_overrides=False))
+
+    def test_pci_1716_allows_one_differential_pair_with_unused_odd_channel(self):
+        raw = configuration().raw
+        raw['DEVICE_DESCRIPTION'] = 'PCI-1716,BID#0'
+        raw['CHANNELS']['0']['signal_type'] = 'Differential'
+        raw['CHANNELS']['1']['enabled'] = False
+        self.assertEqual(validate_production_config(
+            DaqNaviConfig(raw, allow_env_overrides=False)), (0, 2, 3))
+
+    def test_hardware_adapter_applies_edited_signal_type_without_overwriting_pair(self):
+        raw = configuration().raw
+        raw['DEVICE_DESCRIPTION'] = 'PCI-1716,BID#0'
+        raw['CHANNELS']['0']['signal_type'] = 'Differential'
+        raw['CHANNELS']['1']['enabled'] = False
+        raw['CHANNELS']['0']['value_range'] = 'V_Neg5To5'
+        cfg = DaqNaviConfig(raw, allow_env_overrides=False)
+        channels = [SimpleNamespace(signalType=None, valueRange=None) for _ in range(16)]
+        device = MagicMock()
+        device.channels = channels
+        device.prepare.return_value = 0
+        device.start.return_value = 0
+
+        with patch('Automation.BDaq.WaveformAiCtrl.WaveformAiCtrl', return_value=device), \
+             patch('Automation.BDaq.BDaqApi.BioFailed', return_value=False):
+            adapter = AdvantechDaq(cfg)
+            adapter.close()
+
+        self.assertEqual(channels[0].signalType, cfg.channels[0].signal_type)
+        self.assertEqual(channels[0].valueRange, cfg.channels[0].value_range)
+        self.assertIsNone(channels[1].signalType)
+        self.assertEqual(channels[2].signalType, cfg.channels[2].signal_type)
+
+    def test_hardware_adapter_applies_single_ended_mode_to_both_channels(self):
+        raw = configuration().raw
+        raw['DEVICE_DESCRIPTION'] = 'PCI-1716,BID#0'
+        cfg = DaqNaviConfig(raw, allow_env_overrides=False)
+        channels = [SimpleNamespace(signalType=None, valueRange=None) for _ in range(16)]
+        device = MagicMock()
+        device.channels = channels
+        device.prepare.return_value = 0
+        device.start.return_value = 0
+
+        with patch('Automation.BDaq.WaveformAiCtrl.WaveformAiCtrl', return_value=device), \
+             patch('Automation.BDaq.BDaqApi.BioFailed', return_value=False):
+            adapter = AdvantechDaq(cfg)
+            adapter.close()
+
+        self.assertEqual(channels[0].signalType, cfg.channels[0].signal_type)
+        self.assertEqual(channels[1].signalType, cfg.channels[1].signal_type)
 
     def test_disabled_channel_is_not_persisted(self):
         raw = configuration().raw

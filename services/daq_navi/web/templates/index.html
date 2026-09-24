@@ -102,12 +102,12 @@
                             <div class="form-group flex-2 device-picker">
                                 <label for="DEVICE_DESCRIPTION">Device Description / Connection Port</label>
                                 <div class="scan-input-group">
-                                    <input type="text" id="DEVICE_DESCRIPTION" name="DEVICE_DESCRIPTION" required placeholder="e.g. USB-4716,BID#0">
-                                    <button type="button" id="btn-scan-usb" class="btn-scan-usb" title="Scan Host PC for USB & DAQ Ports">
+                                    <input type="text" id="DEVICE_DESCRIPTION" name="DEVICE_DESCRIPTION" required placeholder="e.g. PCI-1716,BID#0">
+                                    <button type="button" id="btn-scan-usb" class="btn-scan-usb" title="Scan host PC for DAQ devices and serial ports">
                                         <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round" class="scan-icon">
                                             <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
                                         </svg>
-                                        <span>SCAN USB</span>
+                                        <span>SCAN DEVICES</span>
                                     </button>
                                 </div>
                                 <div id="scanned-devices-menu" class="scanned-devices-menu hidden"></div>
@@ -298,6 +298,15 @@
                             </div>
                         </div>
 
+                        <div class="destination-test">
+                            <div>
+                                <strong>Check destination</strong>
+                                <p>Test the values above before saving. No sample data is sent.</p>
+                            </div>
+                            <button type="button" id="test-destination-btn" class="test-connection-btn">Test connection</button>
+                        </div>
+                        <div id="destination-test-result" class="destination-test-result" role="status" aria-live="polite"></div>
+
                         <div class="config-subheading">Storage & pipeline tuning</div>
                         <div class="form-row">
                             <div class="form-group">
@@ -348,7 +357,7 @@
                             <div class="form-group"><label for="CHANNEL_UNIT">Physical unit</label><input id="CHANNEL_UNIT" type="text"></div>
                         </div>
                         <div class="form-row">
-                            <div class="form-group"><label for="CHANNEL_SIGNAL_TYPE">Signal type</label><select id="CHANNEL_SIGNAL_TYPE"><option value="SingleEnded">Single ended</option><option value="Differential">Differential</option><option value="PseudoDifferential">Pseudo differential</option></select></div>
+                            <div class="form-group"><label for="CHANNEL_SIGNAL_TYPE">Signal type</label><select id="CHANNEL_SIGNAL_TYPE" aria-describedby="signal-type-help"><option value="SingleEnded">Single ended</option><option value="Differential">Differential</option><option value="PseudoDifferential">Pseudo differential</option></select><small id="signal-type-help" class="text-muted"></small></div>
                             <div class="form-group"><label for="CHANNEL_VALUE_RANGE">Voltage range</label><select id="CHANNEL_VALUE_RANGE"><option value="V_0To5">0–5 V</option><option value="V_Neg5To5">±5 V</option><option value="V_0To10">0–10 V</option><option value="V_Neg10To10">±10 V</option></select></div>
                         </div>
 

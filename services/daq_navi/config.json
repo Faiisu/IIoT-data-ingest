@@ -3,13 +3,13 @@
   "DEVICE_ID": "pci1716-0",
   "PROFILE_PATH": "",
   "START_CHANNEL": 0,
-  "CHANNEL_COUNT": 4,
+  "CHANNEL_COUNT": 1,
   "CLOCK_RATE": 2000,
   "SECTION_LENGTH": 500,
   "SECTION_COUNT": 0,
   "QUEUE_MAXSIZE": 200,
   "MOCKUP_MODE": false,
-  "AUTO_START_ON_STARTUP": true,
+  "AUTO_START_ON_STARTUP": false,
   "AUTO_START_MODE": "production",
   "CHANNELS": {
     "0": {
@@ -20,57 +20,72 @@
       "value_range": "V_0To5",
       "scale": {
         "enabled": true,
-        "low_voltage": 1.0,
-        "high_voltage": 5.0,
-        "low_value": -100.0,
-        "high_value": 100.0,
+        "low_voltage": 1,
+        "high_voltage": 5,
+        "low_value": -1000,
+        "high_value": 1000,
         "revision": "initial"
       }
     },
     "1": {
-      "enabled": true,
+      "enabled": false,
       "label": "pressure-ch1",
       "unit": "kPa",
       "signal_type": "SingleEnded",
       "value_range": "V_0To5",
       "scale": {
         "enabled": true,
-        "low_voltage": 1.0,
-        "high_voltage": 5.0,
-        "low_value": -100.0,
-        "high_value": 100.0,
+        "low_voltage": 1,
+        "high_voltage": 5,
+        "low_value": -100,
+        "high_value": 100,
         "revision": "initial"
       }
     },
     "2": {
-      "enabled": true,
+      "enabled": false,
       "label": "pressure-ch2",
       "signal_type": "SingleEnded",
       "value_range": "V_0To5",
       "scale": {
         "enabled": true,
-        "low_voltage": 1.0,
-        "high_voltage": 5.0,
-        "low_value": -100.0,
-        "high_value": 100.0,
+        "low_voltage": 1,
+        "high_voltage": 5,
+        "low_value": -100,
+        "high_value": 100,
         "revision": "initial"
       },
       "unit": "kPa"
     },
     "3": {
-      "enabled": true,
+      "enabled": false,
       "label": "pressure-ch3",
       "signal_type": "SingleEnded",
       "value_range": "V_0To5",
       "scale": {
         "enabled": true,
-        "low_voltage": 1.0,
-        "high_voltage": 5.0,
-        "low_value": -100.0,
-        "high_value": 100.0,
+        "low_voltage": 1,
+        "high_voltage": 5,
+        "low_value": -100,
+        "high_value": 100,
         "revision": "initial"
       },
       "unit": "kPa"
+    },
+    "4": {
+      "enabled": false,
+      "label": "",
+      "unit": "",
+      "signal_type": "SingleEnded",
+      "value_range": "V_0To5",
+      "scale": {
+        "enabled": false,
+        "revision": "",
+        "low_voltage": 0,
+        "high_voltage": 5,
+        "low_value": 0,
+        "high_value": 100
+      }
     }
   },
   "DESTINATION": "postgresql",
@@ -84,7 +99,7 @@
   "SPOOL_MAX_BYTES": 137438953472,
   "DB_USER": "admin",
   "DB_PASSWORD": "admin",
-  "DB_DSN": "postgresql://admin:admin@timescaledb:5432/daq_db",
+  "DB_DSN": "user=admin password=admin dbname=daq_db host=timescaledb port=5432",
   "DB_PAGE_SIZE": 8000,
   "DB_INSERT_METHOD": "execute_values",
   "DB_RETENTION_DAYS": 30,

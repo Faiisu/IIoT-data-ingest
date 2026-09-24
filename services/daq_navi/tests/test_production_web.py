@@ -225,6 +225,19 @@ class ProductionWebTests(unittest.TestCase):
             web.init_application()
         start.assert_called_once_with('production')
 
+    def test_invalid_pci_signal_edit_does_not_save_or_restart_running_daq(self):
+        original = self.path.read_text(encoding='utf-8')
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
+             patch.object(web, 'stop_acquisition') as stop:
+            response = self.client.post('/api/config', json={
+                'CHANNELS': {'0': {'signal_type': 'PseudoDifferential'}},
+            })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('PseudoDifferential', response.get_json()['message'])
+        self.assertEqual(self.path.read_text(encoding='utf-8'), original)
+        stop.assert_not_called()
+
     def test_full_round_trip_channel_editing_and_production_start_validation(self):
         updated_payload = {
             'CLOCK_RATE': 1500,
@@ -659,4 +672,3 @@ class ProductionWebTests(unittest.TestCase):
         self.assertIn('Production samples unavailable', res_fail.get_json()['message'])
 if __name__ == '__main__':
     unittest.main()
-
