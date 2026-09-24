@@ -80,7 +80,13 @@ def get_channels():
     try:
         conn = psycopg2.connect(dsn, connect_timeout=3)
         with conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT channel FROM daq_samples ORDER BY channel;")
+            cur.execute("""
+                SELECT DISTINCT channel FROM (
+                    SELECT channel FROM daq_telemetry
+                    UNION
+                    SELECT channel FROM daq_production_samples
+                ) ch ORDER BY channel;
+            """)
             channels = [row[0] for row in cur.fetchall()]
         return jsonify(channels)
     except Exception as e:
@@ -121,11 +127,30 @@ def get_data():
             end_dt = datetime.now(timezone.utc)
             start_dt = end_dt - timedelta(seconds=last_sec)
 
-        query = """
-            SELECT time, value 
+        duration = (end_dt - start_dt).total_seconds()
+
+        # Adaptive time-bucketing to prevent browser lag while preserving waveform detail
+        # Max ~1,200 points returned
+        if duration <= 120:
+            bucket = '50 milliseconds'
+        elif duration <= 600:
+            bucket = '250 milliseconds'
+        elif duration <= 3600:
+            bucket = '2 seconds'
+        else:
+            bucket = '10 seconds'
+
+        query = f"""
+            SELECT 
+                time_bucket('{bucket}', time) AS time,
+                avg(raw_voltage) AS raw_voltage,
+                avg(calibrated_value) AS calibrated_value,
+                max(unit) AS unit,
+                max(sensor_name) AS sensor_name
             FROM daq_telemetry 
             WHERE channel = %s AND time >= %s AND time <= %s 
-            ORDER BY time ASC;
+            GROUP BY 1
+            ORDER BY 1 ASC;
         """
         params = (channel, start_dt, end_dt)
 
@@ -134,11 +159,18 @@ def get_data():
             rows = cur.fetchall()
             
             times = [r['time'].isoformat() for r in rows]
-            values = [r['value'] for r in rows]
+            raw_voltages = [float(r['raw_voltage']) if r['raw_voltage'] is not None else None for r in rows]
+            calibrated_values = [float(r['calibrated_value']) if r['calibrated_value'] is not None else None for r in rows]
+            unit = rows[0]['unit'] if rows and rows[0]['unit'] else ''
+            sensor_name = rows[0]['sensor_name'] if rows and rows[0]['sensor_name'] else f'Channel {channel}'
 
         return jsonify({
             'times': times,
-            'values': values
+            'values': raw_voltages,
+            'raw_voltages': raw_voltages,
+            'calibrated_values': calibrated_values,
+            'unit': unit,
+            'sensor_name': sensor_name
         })
 
     except Exception as e:

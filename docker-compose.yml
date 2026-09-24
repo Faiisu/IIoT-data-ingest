@@ -108,6 +108,10 @@ services:
       - "${PLOTTER_PORT:-8084}:8084"
     environment:
       DB_DSN: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-admin}@timescaledb:5432/${POSTGRES_DB:-daq_db}
+    volumes:
+      - ./services/plotter:/app/services/plotter
+      - ./shared:/app/shared
+      - ./services/daq_navi/config.json:/app/services/daq_navi/config.json:ro
     depends_on:
       timescaledb:
         condition: service_healthy

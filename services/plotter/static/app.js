@@ -413,7 +413,7 @@ function initPlotlyChart(plot) {
         plot_bgcolor: '#0f1013',
         margin: { t: 15, r: 15, b: 35, l: 40 },
         dragmode: 'pan',
-        showlegend: plot.service !== 'daq',
+        showlegend: true,
         legend: {
             font: { color: '#64748b', size: 8 },
             orientation: 'h',
@@ -479,15 +479,28 @@ async function queryPlotData(plot) {
         const times = result.times;
 
         if (plot.service === 'daq') {
+            const unit = result.unit || 'V';
+            const sensor = result.sensor_name || `CH${plot.channel}`;
             traces.push({
                 x: times,
-                y: result.values,
-                name: 'DAQ Voltage',
+                y: result.raw_voltages || result.values,
+                name: `${sensor} Raw Voltage (V)`,
                 type: 'scatter',
                 mode: 'lines',
                 line: { color: '#0ea5e9', width: 1.5 },
-                hovertemplate: '<b>Time:</b> %{x|%H:%M:%S.%L}<br><b>Voltage:</b> %{y:.4f} V<extra></extra>'
+                hovertemplate: '<b>Time:</b> %{x|%H:%M:%S.%L}<br><b>Raw:</b> %{y:.4f} V<extra></extra>'
             });
+            if (result.calibrated_values && result.calibrated_values.length > 0) {
+                traces.push({
+                    x: times,
+                    y: result.calibrated_values,
+                    name: `${sensor} Calibrated (${unit})`,
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#10b981', width: 1.5, dash: 'dot' },
+                    hovertemplate: `<b>Time:</b> %{x|%H:%M:%S.%L}<br><b>Calibrated:</b> %{y:.4f} ${unit}<extra></extra>`
+                });
+            }
         } else if (plot.service === 'musashi_ii') {
             traces.push({
                 x: times,
