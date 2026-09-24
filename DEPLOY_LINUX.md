@@ -24,7 +24,7 @@ docker compose ps
 curl http://localhost:8081/api/health
 ```
 
-Use the portal at `http://localhost:8080`, DAQ Navi at `http://localhost:8081`, and Plotter at `http://localhost:8084`. Development mounts make source visible inside containers; restart the affected service if a code change does not take effect. For the base Compose file without the override:
+Use the portal at `http://localhost:8080` and DAQ Navi at `http://localhost:8081`. Development mounts make source visible inside containers; restart the affected service if a code change does not take effect. For the base Compose file without the override:
 
 ```bash
 docker compose -f docker-compose.yml up -d --build
@@ -55,7 +55,6 @@ Start production acquisition only after checking the saved configuration, signal
 | TimescaleDB/PostgreSQL | 5432 |
 | Mosquitto | 1883 |
 | InfluxDB | 8086 |
-| Plotter | 8084 |
 
 Port mappings can be changed with the corresponding variables in `.env`. Database and broker ports are published by default; restrict them with host firewall/network rules when they are not needed by other machines. The web interfaces do not provide authentication in this stack, so do not expose them to an untrusted network without adding access control.
 

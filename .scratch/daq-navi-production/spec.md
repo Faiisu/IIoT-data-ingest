@@ -22,7 +22,7 @@ mockup-first flow overlap or conflict with this production contract.
 - Production startup can select mockup; hardware failures can trigger automatic mockup fallback. Container health can remain green while ingestion is stopped.
 - The in-memory queue discards batches when full. Requeued failures move behind newer batches, alter computed timestamps, and can loop indefinitely during shutdown. The web forcibly kills the writer before its configured drain period.
 - The telemetry schema has no stable sample identity or uniqueness constraint and stores only a rounded calibrated value. Config/session metadata is not recorded. Current timestamp anchoring uses the batch arrival time as the first sample time; dropped batches shift later timestamps.
-- The configured retention policy is created with `if_not_exists`, so changing the config does not update an existing policy. Plotter labels calibrated values as voltage and does not show acquisition gaps.
+- The configured retention policy is created with `if_not_exists`, so changing the config does not update an existing policy.
 
 ## Deployment acceptance gates
 

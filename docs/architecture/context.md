@@ -4,16 +4,13 @@
 graph LR
     Operator[Operator browser] --> Portal[Portal :8080]
     Operator --> DAQUI[DAQ Navi UI/API :8081]
-    Operator --> Plotter[Plotter UI/API :8084]
     Portal -->|links| DAQUI
-    Portal -->|links| Plotter
     DAQUI --> Control[DAQ Navi control process]
     Control --> Driver[Advantech BioDAQ SDK and physical card]
     Control --> Spool[(Persistent SQLite spool)]
     Spool --> Writer[Production database writer]
     Writer --> Production[(TimescaleDB production samples and gaps)]
     DAQUI --> Production
-    Plotter -->|database queries| Production
     Legacy[(Legacy/mockup tables)] -. separate schema/path .- DB[(PostgreSQL/TimescaleDB)]
 ```
 

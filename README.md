@@ -4,7 +4,6 @@ A Docker Compose workspace for configuring Advantech DAQNavi acquisition, storin
 
 - **Portal** (`:8080`): links to the service interfaces.
 - **DAQ Navi** (`:8081`): acquisition configuration, start/stop controls, status, and sample inspection.
-- **Plotter** (`:8084`): database-backed chart interface.
 - **TimescaleDB**, **Mosquitto**, and **InfluxDB** provide database/broker services in the Compose stack.
 
 ---
@@ -24,8 +23,7 @@ graph LR
     Device --> Spool[Persistent SQLite spool]
     Spool --> Production[(TimescaleDB production tables)]
     Synthetic --> Mock[(Mockup/legacy destination config)]
-    Production --> Plotter[Plotter :8084]
-    Mock --> Plotter
+    Production --> Inspect[Inspect stored samples through DAQ Navi API/database]
 ```
 
 Production capture writes batches to the persistent local spool before the database writer sends them to TimescaleDB. Failed writes remain pending for retry, subject to the configured spool limit. Mockup acquisition is a separate mode; verify its configured destination and table before using it.
@@ -35,12 +33,10 @@ Production capture writes batches to the persistent local spool before the datab
 ```mermaid
 graph LR
     Portal[Portal :8080] --> DAQUI[DAQ Navi web/API :8081]
-    Portal --> PlotUI[Plotter web/API :8084]
     DAQUI[DAQ Navi control] --> Pipeline[Production acquisition process]
     Pipeline --> Hardware[Advantech BioDAQ SDK / Linux host]
     Pipeline --> Spool[(Persistent SQLite spool)]
     Pipeline -->|retrying batch writer| DB[(TimescaleDB/PostgreSQL :5432)]
-    PlotUI --> DB
     DAQUI --> DB
     DB -. optional service .-> MQTT[Mosquitto :1883]
     DB -. optional service .-> Influx[InfluxDB :8086]
@@ -87,7 +83,7 @@ docker compose ps
 curl http://localhost:8081/api/health
 ```
 
-Open Portal at `http://localhost:8080`, DAQ Navi at `http://localhost:8081`, and Plotter at `http://localhost:8084`. See [Linux deployment](DEPLOY_LINUX.md) for hardware prerequisites and operations. Windows Docker usage does not provide the Linux device/library mounts required for physical DAQ acquisition; see [Windows notes](DEPLOY_WINDOWS.md).
+Open Portal at `http://localhost:8080` and DAQ Navi at `http://localhost:8081`. See [Linux deployment](DEPLOY_LINUX.md) for hardware prerequisites and operations. Windows Docker usage does not provide the Linux device/library mounts required for physical DAQ acquisition; see [Windows notes](DEPLOY_WINDOWS.md).
 
 ---
 

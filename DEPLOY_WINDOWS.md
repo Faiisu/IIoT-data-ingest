@@ -23,11 +23,11 @@ The default override enables development mounts/settings. To use only the base C
 docker compose -f docker-compose.yml up -d --build
 ```
 
-Open Portal `http://localhost:8080`, DAQ Navi `http://localhost:8081`, or Plotter `http://localhost:8084`. Without the supported host driver and device, use mockup/demo workflows only; a successful web or database connection does not indicate physical DAQ access.
+Open Portal `http://localhost:8080` or DAQ Navi `http://localhost:8081`. Without the supported host driver and device, use mockup/demo workflows only; a successful web or database connection does not indicate physical DAQ access.
 
 ## Services
 
-The Compose stack contains `timescaledb`, `mqtt-broker`, `influxdb`, `daq-navi`, `portal`, and `plotter`. The Musashi services are separate from this Compose stack. See [`services/musashi_ii/WINDOWS_SETUP.md`](services/musashi_ii/WINDOWS_SETUP.md) for the Musashi II Windows setup instructions.
+The Compose stack contains `timescaledb`, `mqtt-broker`, `influxdb`, `daq-navi`, and `portal`. The Musashi services are separate from this Compose stack. See [`services/musashi_ii/WINDOWS_SETUP.md`](services/musashi_ii/WINDOWS_SETUP.md) for the Musashi II Windows setup instructions.
 
 ## Network access
 

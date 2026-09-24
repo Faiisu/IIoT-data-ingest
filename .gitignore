@@ -5,7 +5,6 @@ __pycache__/
 .daq.pid
 .musashi_ii.pid
 .musashi_iv.pid
-.plotter.pid
 services/daq_navi/.daq_process.pid
 services/daq_navi/.daq_process.mode
 services/daq_navi/daq_pipeline.log

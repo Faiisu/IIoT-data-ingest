@@ -4,7 +4,7 @@
 test_docker_compose.py
 ───────────────────────
 Tests for Ticket 06: Docker Compose full stack deployment.
-- Verifies docker-compose.yml defines: timescaledb, mqtt-broker, influxdb, daq-navi, portal, plotter
+- Verifies docker-compose.yml defines: timescaledb, mqtt-broker, influxdb, daq-navi, portal
 - Verifies TimescaleDB auto-initialization with db_setup.sql
 - Verifies daq-navi container: privileged, /dev, /usr/lib, /etc/biobdaq, config.json bind-mount
 - Verifies mosquitto.conf for anonymous local access
@@ -48,7 +48,7 @@ class TestDockerComposeStack(unittest.TestCase):
         with open(self.compose_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
         services = data.get("services", {})
-        required = ["timescaledb", "mqtt-broker", "influxdb", "daq-navi", "portal", "plotter"]
+        required = ["timescaledb", "mqtt-broker", "influxdb", "daq-navi", "portal"]
         for req in required:
             self.assertIn(req, services, f"Required service '{req}' missing from docker-compose.yml")
 
@@ -104,17 +104,14 @@ class TestDockerComposeStack(unittest.TestCase):
         self.assertTrue(any("/etc/biobdaq" in v for v in volumes), "daq-navi must mount /etc/biobdaq")
         self.assertTrue(any("config.json" in v for v in volumes), "daq-navi must bind-mount config.json")
 
-    def test_portal_and_plotter_ports(self):
+    def test_portal_port(self):
         with open(self.compose_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
         portal = data["services"]["portal"]
-        plotter = data["services"]["plotter"]
         
         portal_ports = [str(p) for p in portal.get("ports", [])]
         self.assertTrue(any("8080" in p for p in portal_ports), "portal must expose port 8080")
         
-        plotter_ports = [str(p) for p in plotter.get("ports", [])]
-        self.assertTrue(any("8084" in p for p in plotter_ports), "plotter must expose port 8084")
 
     def test_mosquitto_conf_file(self):
         self.assertTrue(os.path.exists(self.mosquitto_conf_path), f"Missing {self.mosquitto_conf_path}")
@@ -130,7 +127,7 @@ class TestDockerComposeStack(unittest.TestCase):
         required_keys = [
             "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "DB_PORT",
             "MQTT_PORT", "INFLUX_PORT", "INFLUX_TOKEN", "MOCKUP_MODE",
-            "DESTINATION", "PORTAL_PORT", "PLOTTER_PORT"
+            "DESTINATION", "PORTAL_PORT"
         ]
         for k in required_keys:
             self.assertIn(k, content, f"Missing key '{k}' in .env.example")

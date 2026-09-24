@@ -98,24 +98,6 @@ services:
     volumes:
       - ./services/portal:/usr/share/nginx/html:ro
 
-  plotter:
-    build:
-      context: .
-      dockerfile: services/plotter/Dockerfile
-    container_name: daq_plotter
-    restart: unless-stopped
-    ports:
-      - "${PLOTTER_PORT:-8084}:8084"
-    environment:
-      DB_DSN: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-admin}@timescaledb:5432/${POSTGRES_DB:-daq_db}
-    volumes:
-      - ./services/plotter:/app/services/plotter
-      - ./shared:/app/shared
-      - ./services/daq_navi/config.json:/app/services/daq_navi/config.json:ro
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-
 volumes:
   tsdb_data:
   daq_spool:

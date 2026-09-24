@@ -630,7 +630,6 @@ if [[ -n "$COMPOSE_CMD" ]]; then
         say "✓ All containers are operational and healthy."
         say "Service Endpoints:"
         note "  • Ingestion Portal    : http://localhost:8080"
-        note "  • Telemetry Plotter   : http://localhost:8084"
         note "  • TimescaleDB         : $DB_HOST:$DB_PORT (DB: $POSTGRES_DB)"
         note "  • Mosquitto MQTT      : localhost:1883"
         note "  • InfluxDB Web UI     : http://localhost:8086"
