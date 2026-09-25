@@ -130,6 +130,7 @@ DAQ mockup acquisition generates synthetic values and uses its configured destin
 |:---|:---|
 | `docker-compose.yml`, `docker-compose.override.yml` | Base stack and development bind mounts. |
 | `services/portal/` | Static Portal frontend. |
+| `references/advantech_sdk/`, `docs/hardware/` | Vendor examples and hardware references; see the [third-party provenance inventory](docs/third-party-provenance.md) for notices and redistribution status. |
 | `services/daq_navi/web/` | Config Center, REST API, and process control. |
 | `services/daq_navi/core/` | DAQ configuration loading, physical capture, spool, writer, and mockup acquisition. |
 | `services/musashi_ii/`, `services/musashi_iv/` | Independent dispenser ingestion services. |
