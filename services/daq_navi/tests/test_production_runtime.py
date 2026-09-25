@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,19 @@ SERVICE = ROOT / "services" / "daq_navi"
 
 
 class ProductionRuntimeTests(unittest.TestCase):
+    def test_previous_production_launcher_remains_executable(self):
+        result = subprocess.run(
+            [sys.executable,
+             str(SERVICE / "core" / "stream_to_db.py"), "--help"],
+            cwd=SERVICE,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--config", result.stdout)
+
     def test_explicit_mockup_uses_separate_table(self):
         from services.daq_navi.core import mockup_stream_to_db
 

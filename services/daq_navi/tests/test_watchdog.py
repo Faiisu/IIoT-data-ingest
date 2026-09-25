@@ -19,7 +19,7 @@ for p in (CORE_DIR, SERVICE_DIR, PROJECT_ROOT):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from stream_to_db import check_pipeline_watchdog, TimescaleDBClient
+from buffered_daq_to_timescaledb import check_pipeline_watchdog, TimescaleDBClient
 
 
 class TestPipelineWatchdog(unittest.TestCase):
@@ -104,8 +104,8 @@ class TestPipelineWatchdog(unittest.TestCase):
 class TestTimescaleClientTimeouts(unittest.TestCase):
     """Verify database connection includes connect_timeout and statement_timeout options."""
 
-    @patch("stream_to_db.ensure_db_and_tables", return_value=True)
-    @patch("stream_to_db.psycopg2.connect")
+    @patch("buffered_daq_to_timescaledb.ensure_db_and_tables", return_value=True)
+    @patch("buffered_daq_to_timescaledb.psycopg2.connect")
     def test_connect_uses_timeouts(self, mock_pg_connect, mock_ensure):
         mock_conn = MagicMock()
         mock_pg_connect.return_value = mock_conn

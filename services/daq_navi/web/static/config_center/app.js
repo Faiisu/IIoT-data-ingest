@@ -6,6 +6,7 @@ let channels = {};
 let selectedChannel = 0;
 let dirty = false;
 let running = false;
+let clearing = false;
 let manualDsn = false;
 let validationVisible = false;
 let pendingSamples = [];
@@ -447,6 +448,10 @@ async function refreshStatus() {
     $('side-dot').className = `dot ${state === 'running' ? 'online' : state === 'buffering' ? 'warning' : state === 'faulted' ? 'fault' : ''}`;
     $('start-acquisition').disabled = running;
     $('stop-acquisition').disabled = !running;
+    const jobResponse = await api('/api/buffer/clear');
+    const job = jobResponse.ok ? await jobResponse.json() : {state: 'idle'};
+    clearing = job.state === 'starting' || job.state === 'running';
+    $('clear-buffer').disabled = running || clearing || Number(status.pending_batches || 0) === 0;
     $('runtime-description').textContent = running ? `Acquisition is ${state}.` : 'Acquisition is stopped.';
     $('runtime-message').textContent = status.writer_error || status.fault || (running ? 'Samples are being acquired by the DAQ service.' : 'Start only after verifying the device, wiring, and destination.');
     const pending = Number(status.pending_batches);
@@ -472,6 +477,8 @@ async function refreshStatus() {
     $('side-dot').className = 'dot fault';
     $('start-acquisition').disabled = true;
     $('stop-acquisition').disabled = true;
+    $('clear-buffer').disabled = true;
+    clearing = false;
     $('runtime-description').textContent = 'DAQ service unavailable.';
     $('runtime-message').textContent = 'Check the DAQ service before controlling acquisition.';
   }
@@ -594,6 +601,32 @@ async function stopAcquisition() {
     await refreshStatus();
   } catch (error) { setMessage(error.message, 'error'); await refreshStatus(); }
 }
+async function clearBuffer() {
+  try {
+    const statusResponse = await api('/api/status');
+    const status = await statusResponse.json();
+    if (status.is_running) throw new Error('Stop acquisition before clearing the buffer.');
+    const batches = Number(status.pending_batches || 0);
+    if (!batches) { setMessage('The local buffer is already empty.', 'success'); await refreshStatus(); return; }
+    const size = formatBytes(Number(status.pending_bytes || 0));
+    if (!window.confirm(`Permanently discard ${batches} pending production batches (${size})? They will not be delivered to TimescaleDB. Discarded sample intervals will be recorded as gaps.`)) return;
+    $('clear-buffer').disabled = true;
+    const response = await api('/api/buffer/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirm: 'CLEAR BUFFER'})});
+    let result = await response.json();
+    if (!response.ok) throw new Error(result.message || 'Could not clear pending data.');
+    clearing = result.state === 'starting' || result.state === 'running';
+    while (clearing) {
+      setMessage('Clearing pending data. The DAQ service remains available during this operation.', 'warning');
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const jobResponse = await api('/api/buffer/clear');
+      result = await jobResponse.json();
+      if (!jobResponse.ok || result.state === 'failed') throw new Error(result.message || 'Could not clear pending data.');
+      clearing = result.state === 'starting' || result.state === 'running';
+    }
+    setMessage(`Cleared ${result.cleared_batches} pending batch(es) and recorded ${result.recorded_gaps} gap(s).`, 'success');
+    await refreshStatus();
+  } catch (error) { setMessage(error.message, 'error'); await refreshStatus(); }
+}
 function markChanged() {
   setDirty(true);
   updateSummary();
@@ -614,6 +647,7 @@ $('test-destination').addEventListener('click', testDestination);
 $('scan-button').addEventListener('click', scanDevices);
 $('start-acquisition').addEventListener('click', runAcquisition);
 $('stop-acquisition').addEventListener('click', stopAcquisition);
+$('clear-buffer').addEventListener('click', clearBuffer);
 scaleIds.forEach((id) => $(id).addEventListener('input', () => { pullChannelEditor(); markChanged(); }));
 fields.forEach((id) => {
   if (!$(id)) return;

@@ -28,7 +28,7 @@ for p in (CORE_DIR, SERVICE_DIR, PROJECT_ROOT):
         sys.path.insert(0, p)
 
 from config_loader import load_daq_config
-from stream_to_db import ensure_db_and_tables, TimescaleDBClient
+from buffered_daq_to_timescaledb import ensure_db_and_tables, TimescaleDBClient
 
 class TestTimescaleDBPolicies(unittest.TestCase):
     @classmethod
@@ -245,7 +245,7 @@ class TestTimescaleDBPolicies(unittest.TestCase):
         conn.close()
 
     def test_mockup_stream_pipeline_e2e_verification(self):
-        from stream_to_db import Calibrator, DaqSampleParser
+        from buffered_daq_to_timescaledb import Calibrator, DaqSampleParser
         
         calibrator = Calibrator(
             start_channel=self.cfg.START_CHANNEL,

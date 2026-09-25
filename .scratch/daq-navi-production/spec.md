@@ -26,7 +26,7 @@ mockup-first flow overlap or conflict with this production contract.
 
 ## Deployment acceptance gates
 
-The standalone `stream_to_db.py` acquisition path must be implemented and pass its automated and physical-DAQ/TimescaleDB acceptance checks before web UI development begins. Tests must use isolated test data, exercise four channels at the maximum production rate, and cover configuration, calibration, timestamps, database outage and replay, idempotence, buffer exhaustion, hardware failure, and graceful shutdown. A passing script gate is a prerequisite for connecting the web controls and displays.
+The standalone `buffered_daq_to_timescaledb.py` acquisition path must be implemented and pass its automated and physical-DAQ/TimescaleDB acceptance checks before web UI development begins. Tests must use isolated test data, exercise four channels at the maximum production rate, and cover configuration, calibration, timestamps, database outage and replay, idempotence, buffer exhaustion, hardware failure, and graceful shutdown. A passing script gate is a prerequisite for connecting the web controls and displays.
 
 1. The operator enters and confirms physical name, unit, and calibration for every enabled channel. Invalid or incomplete configuration cannot start production acquisition.
 2. The web saves every supported setting without removing unrelated settings, shows the effective saved value, and applies changes at a clear acquisition-session boundary.

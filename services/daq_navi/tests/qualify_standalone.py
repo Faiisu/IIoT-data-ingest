@@ -27,7 +27,7 @@ from psycopg2 import sql
 
 SERVICE = Path(__file__).resolve().parents[1]
 ROOT = SERVICE.parents[1]
-SCRIPT = SERVICE / "core" / "stream_to_db.py"
+SCRIPT = SERVICE / "core" / "buffered_daq_to_timescaledb.py"
 DEFAULT_REPORT_DIR = ROOT / ".scratch" / "daq-navi-production" / "qualification"
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
 

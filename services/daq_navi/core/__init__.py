@@ -8,7 +8,7 @@ from .config_loader import (
     resolve_value_range,
 )
 
-from .stream_to_db import (
+from .buffered_daq_to_timescaledb import (
     Calibrator,
     DaqSampleParser,
     TimescaleDBClient,

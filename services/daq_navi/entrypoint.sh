@@ -25,8 +25,8 @@ if [ "${ENABLE_WEB_UI:-true}" = "true" ] && [ "${HEADLESS:-false}" != "true" ]; 
     exec $PY app.py "$@"
 fi
 
-STREAM_SCRIPT="core/stream_to_db.py"
-[ -f "$STREAM_SCRIPT" ] || STREAM_SCRIPT="stream_to_db.py"
+STREAM_SCRIPT="core/buffered_daq_to_timescaledb.py"
+[ -f "$STREAM_SCRIPT" ] || STREAM_SCRIPT="buffered_daq_to_timescaledb.py"
 
 MOCKUP_SCRIPT="core/mockup_stream_to_db.py"
 [ -f "$MOCKUP_SCRIPT" ] || MOCKUP_SCRIPT="mockup_stream_to_db.py"

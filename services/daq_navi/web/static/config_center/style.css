@@ -200,6 +200,8 @@ h1 { margin-bottom: 5px; font: 800 clamp(24px, 2.4vw, 31px)/1.18 var(--display);
 .meter { height: 5px; margin: 11px 0 7px; overflow: hidden; border-radius: 5px; background: #e9eeeb; }
 .meter span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--primary); transition: width .35s ease; }
 .buffer-meta { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 8px; }
+.buffer-clear-note { margin: 13px 0 8px; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.buffer-clear-button { width: 100%; }
 .page-message { min-height: 0; color: var(--muted); font-size: 11px; }
 .page-message:not(:empty) { margin-bottom: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: white; }
 .page-message.success { border-color: #c6e1d1; background: #f1f8f3; color: var(--primary); }

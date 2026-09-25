@@ -305,6 +305,14 @@ class ProductionWebTests(unittest.TestCase):
         self.assertFalse(result.get_json()['started'])
         self.assertIn('mode must be production or mockup', result.get_json()['message'])
 
+    def test_start_rejected_while_buffer_clear_is_running(self):
+        job = Path(self.directory.name) / 'buffer-clear-job.json'
+        job.write_text(json.dumps({'state': 'starting', 'checked_at_ns': time.time_ns()}))
+        with patch.object(web, 'get_running_process', return_value=(None, None)):
+            response = self.client.post('/api/start', json={'mode': 'production'})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('clearing', response.get_json()['message'])
+
     def test_start_explicit_mockup_launches_mockup_script(self):
         mock_proc = MagicMock()
         mock_proc.pid = 5555
@@ -330,7 +338,7 @@ class ProductionWebTests(unittest.TestCase):
         self.assertTrue(res.get_json()['started'])
         self.assertEqual(res.get_json()['mode'], 'production')
         popen_args = mock_popen.call_args[0][0]
-        self.assertTrue(any('stream_to_db.py' in str(arg) for arg in popen_args))
+        self.assertTrue(any('buffered_daq_to_timescaledb.py' in str(arg) for arg in popen_args))
 
     def test_stop_when_not_running(self):
         with patch.object(web, 'get_running_process', return_value=(None, None)), \
@@ -348,6 +356,55 @@ class ProductionWebTests(unittest.TestCase):
         self.assertEqual(result.status_code, 503)
         self.assertFalse(result.get_json()['stopped'])
         self.assertIn('Drain timeout', result.get_json()['message'])
+
+    def test_clear_buffer_requires_confirmation_and_stopped_acquisition(self):
+        spool = web.DurableSpool(Path(self.directory.name), 4096)
+        spool.append('batch-1', [{'time_ns': 1_000_000_000}])
+        spool.close()
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')):
+            active = self.client.post('/api/buffer/clear', json={'confirm': 'CLEAR BUFFER'})
+        self.assertEqual(active.status_code, 409)
+        with patch.object(web, 'get_running_process', return_value=(None, None)):
+            unconfirmed = self.client.post('/api/buffer/clear', json={})
+        self.assertEqual(unconfirmed.status_code, 400)
+        reopened = web.DurableSpool(Path(self.directory.name), 4096)
+        self.assertEqual(reopened.pending_batches, 1)
+        reopened.close()
+
+    def test_clear_buffer_discards_pending_batches_and_updates_status(self):
+        spool = web.DurableSpool(Path(self.directory.name), 4096)
+        spool.append('batch-1', [{'time_ns': 1_000_000_000}])
+        spool.close()
+        with patch.object(web, 'get_running_process', return_value=(None, None)):
+            response = self.client.post('/api/buffer/clear',
+                                        json={'confirm': 'CLEAR BUFFER'})
+        self.assertEqual(response.status_code, 202, response.get_json())
+        self.assertEqual(self.client.get('/api/status').status_code, 200)
+        for _ in range(100):
+            result = self.client.get('/api/buffer/clear').get_json()
+            if result['state'] in ('complete', 'failed'):
+                break
+            time.sleep(0.05)
+        self.assertEqual(result['state'], 'complete', result)
+        self.assertEqual(result['cleared_batches'], 1)
+        self.assertEqual(result['pending_batches'], 0)
+        self.assertEqual(web.read_runtime_status(self.config)['pending_batches'], 0)
+        reopened = web.DurableSpool(Path(self.directory.name), 4096)
+        self.assertEqual(reopened.pending_batches, 0)
+        self.assertEqual(reopened.pending_gaps()[0]['cause'], 'operator_cleared_buffer')
+        reopened.close()
+
+    def test_clear_buffer_rejects_locked_spool(self):
+        spool = web.DurableSpool(Path(self.directory.name), 4096)
+        try:
+            spool.append('batch-1', [{'time_ns': 1_000_000_000}])
+            with patch.object(web, 'get_running_process', return_value=(None, None)):
+                response = self.client.post('/api/buffer/clear',
+                                            json={'confirm': 'CLEAR BUFFER'})
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(spool.pending_batches, 1)
+        finally:
+            spool.close()
 
     def test_save_running_session_with_pending_replay_reports_not_drained(self):
         calls = []
@@ -411,7 +468,7 @@ class ProductionWebTests(unittest.TestCase):
         self.assertTrue(res.get_json()['started'])
         self.assertEqual(res.get_json()['mode'], 'production')
         popen_args = mock_popen.call_args[0][0]
-        self.assertTrue(any('stream_to_db.py' in str(arg) for arg in popen_args))
+        self.assertTrue(any('buffered_daq_to_timescaledb.py' in str(arg) for arg in popen_args))
         self.assertEqual(Path(web.PID_PATH).read_text(encoding='utf-8'), '7777')
         self.assertEqual(Path(web.MODE_PATH).read_text(encoding='utf-8'), 'production')
 
@@ -561,7 +618,24 @@ class ProductionWebTests(unittest.TestCase):
         self.assertEqual(health_res.status_code, 200)
         health = health_res.get_json()
         self.assertTrue(health['healthy'])
-        self.assertEqual(health['status'], 'stopped')
+
+    def test_stopped_acquisition_ignores_previous_writer_error(self):
+        self.config['AUTO_START_ON_STARTUP'] = False
+        self.path.write_text(json.dumps(self.config), encoding='utf-8')
+        with patch.object(web, 'get_running_process', return_value=(None, None)), \
+             patch.object(web, 'read_runtime_status', return_value={
+                 'state': 'stopped', 'pending_batches': 42,
+                 'last_writer_error': 'previous statement timeout',
+             }):
+            status_response = self.client.get('/api/status')
+            health_response = self.client.get('/api/health')
+        status = status_response.get_json()
+        self.assertEqual(status['status'], 'stopped')
+        self.assertEqual(status['pending_batches'], 42)
+        self.assertIsNone(status['writer_error'])
+        self.assertTrue(status['healthy'])
+        self.assertEqual(health_response.status_code, 200)
+        self.assertEqual(health_response.get_json()['status'], 'stopped')
 
     def test_stopped_acquisition_unhealthy_when_expected(self):
         self.config['AUTO_START_ON_STARTUP'] = True

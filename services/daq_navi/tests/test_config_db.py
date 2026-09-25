@@ -69,7 +69,7 @@ class TestConfigAndSchema(unittest.TestCase):
 
     @patch("psycopg2.connect")
     def test_ensure_db_and_tables_execution(self, mock_connect):
-        from stream_to_db import ensure_db_and_tables
+        from buffered_daq_to_timescaledb import ensure_db_and_tables
         
         mock_conn = MagicMock()
         mock_cur = MagicMock()

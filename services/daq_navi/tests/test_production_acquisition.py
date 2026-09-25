@@ -1,5 +1,6 @@
 """Standalone production acquisition contract; all data stays in temporary storage."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -132,6 +133,45 @@ class ProductionAcquisitionTests(unittest.TestCase):
             reopened.acknowledge("batch-1")
             self.assertEqual(reopened.pending_bytes, 0)
             self.assertEqual(reopened.pending_batches, 0)
+            reopened.close()
+
+    def test_clear_pending_records_discarded_samples_as_gap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spool = DurableSpool(Path(directory), 4096)
+            spool.append("batch-1", [{"time_ns": 1_000_000_000},
+                                      {"time_ns": 1_000_500_000}])
+            spool.append("batch-2", [{"time_ns": 1_001_000_000}])
+            result = spool.clear_pending()
+            self.assertEqual(result["cleared_batches"], 2)
+            self.assertEqual(result["cleared_samples"], 3)
+            self.assertGreater(result["cleared_bytes"], 0)
+            self.assertEqual(result["recorded_gaps"], 1)
+            self.assertEqual(spool.pending_batches, 0)
+            self.assertEqual(spool.pending_bytes, 0)
+            self.assertIsNone(spool.oldest())
+            gap = spool.pending_gaps()[0]
+            self.assertEqual((gap["start_ns"], gap["end_ns"], gap["cause"]),
+                             (1_000_000_000, 1_001_000_000, "operator_cleared_buffer"))
+            spool.close()
+            reopened = DurableSpool(Path(directory), 4096)
+            self.assertEqual(reopened.pending_batches, 0)
+            self.assertEqual(len(reopened.pending_gaps()), 1)
+            reopened.close()
+
+    def test_clear_empty_spool_reclaims_space_after_interrupted_compaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spool = DurableSpool(Path(directory), 1024 * 1024)
+            spool.append('batch-1', [{'time_ns': 1_000_000_000,
+                                      'raw': os.urandom(256_000).hex()}])
+            spool.conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            spool.conn.execute('DELETE FROM batches')
+            spool.conn.commit()
+            spool.close()
+            reopened = DurableSpool(Path(directory), 1024 * 1024)
+            before = reopened.usage_bytes
+            self.assertEqual(reopened.pending_batches, 0)
+            self.assertEqual(reopened.clear_pending()['cleared_batches'], 0)
+            self.assertLess(reopened.usage_bytes, before)
             reopened.close()
 
     def test_spool_replays_commit_order_when_wall_clock_moves_back(self):

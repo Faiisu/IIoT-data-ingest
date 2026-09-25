@@ -3,9 +3,9 @@
   "DEVICE_ID": "pci1716-0",
   "PROFILE_PATH": "",
   "START_CHANNEL": 0,
-  "CHANNEL_COUNT": 8,
+  "CHANNEL_COUNT": 1,
   "CLOCK_RATE": 1000,
-  "SECTION_LENGTH": 16000,
+  "SECTION_LENGTH": 8000,
   "SECTION_COUNT": 0,
   "QUEUE_MAXSIZE": 200,
   "MOCKUP_MODE": false,
@@ -28,7 +28,7 @@
       }
     },
     "1": {
-      "enabled": true,
+      "enabled": false,
       "label": "pressure-ch1",
       "unit": "kPa",
       "signal_type": "SingleEnded",
@@ -43,7 +43,7 @@
       }
     },
     "2": {
-      "enabled": true,
+      "enabled": false,
       "label": "pressure-ch2",
       "signal_type": "SingleEnded",
       "value_range": "V_0To5",
@@ -58,7 +58,7 @@
       "unit": "kPa"
     },
     "3": {
-      "enabled": true,
+      "enabled": false,
       "label": "pressure-ch3",
       "signal_type": "SingleEnded",
       "value_range": "V_0To5",

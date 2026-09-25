@@ -239,6 +239,76 @@ class DurableSpool:
             if self.pending_batches == 0:
                 self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
+    def clear_pending(self):
+        """Discard undelivered batches and record their sample intervals as gaps."""
+        with self._lock:
+            count = self._pending_count
+            if count == 0:
+                self._reclaim_space()
+                return {"cleared_batches": 0, "cleared_samples": 0,
+                        "cleared_bytes": 0, "recorded_gaps": 0}
+
+            intervals = []
+            sample_count = 0
+            timestamp_key = b'"time_ns":'
+            for (payload,) in self.conn.execute("SELECT payload FROM batches ORDER BY rowid"):
+                data = zlib.decompress(payload)
+                first_pos = data.find(timestamp_key)
+                last_pos = data.rfind(timestamp_key)
+                if first_pos < 0:
+                    raise ValueError("pending batch has no sample timestamps")
+                sample_count += data.count(timestamp_key)
+
+                def timestamp_at(position):
+                    start = position + len(timestamp_key)
+                    end = start
+                    while end < len(data) and 48 <= data[end] <= 57:
+                        end += 1
+                    if end == start:
+                        raise ValueError("pending batch has an invalid sample timestamp")
+                    return int(data[start:end])
+
+                first = timestamp_at(first_pos)
+                last = timestamp_at(last_pos)
+                intervals.append((min(first, last), max(first, last)))
+
+            # Adjacent batches are separated by at most one sample period at
+            # the supported 1–2 kHz rates. Preserve larger delivered intervals.
+            merged = []
+            for start, end in sorted(intervals):
+                if merged and start <= merged[-1][1] + 1_000_000:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                else:
+                    merged.append((start, end))
+
+            cleared_bytes = self._pending_bytes
+            try:
+                self.conn.execute("BEGIN IMMEDIATE")
+                self.conn.executemany(
+                    "INSERT INTO gaps VALUES (?, ?, ?, ?, 0)",
+                    ((str(uuid.uuid4()), start, end, "operator_cleared_buffer")
+                     for start, end in merged),
+                )
+                self.conn.execute("DELETE FROM batches")
+                self.conn.commit()
+            except sqlite3.Error:
+                self.conn.rollback()
+                raise
+
+            self._pending_count = 0
+            self._pending_bytes = 0
+            self._reclaim_space()
+            return {"cleared_batches": count, "cleared_samples": sample_count,
+                    "cleared_bytes": cleared_bytes, "recorded_gaps": len(merged)}
+
+    def _reclaim_space(self):
+        try:
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.conn.execute("VACUUM")
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:
+            log.exception("Pending batches cleared, but spool space could not be reclaimed")
+
     def record_gap(self, start_ns: int, end_ns: int, cause: str):
         with self._lock:
             gap_id = str(uuid.uuid4())
@@ -281,6 +351,32 @@ class DurableSpool:
             self.conn.close()
             fcntl.flock(self._lock_file, fcntl.LOCK_UN)
             self._lock_file.close()
+
+
+def clear_spooled_data(directory: Path, max_bytes: int):
+    """Clear a stopped production spool and refresh its runtime snapshot."""
+    spool = DurableSpool(directory, max_bytes)
+    try:
+        result = spool.clear_pending()
+        spool_bytes = spool.usage_bytes
+    finally:
+        spool.close()
+
+    target = Path(directory) / "status.json"
+    try:
+        runtime = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        runtime = {}
+    runtime.update(state="stopped", checked_at_ns=time.time_ns(),
+                   pending_batches=0, pending_bytes=0, spool_bytes=spool_bytes,
+                   last_writer_error=None)
+    temporary = target.with_suffix(".json.tmp")
+    try:
+        temporary.write_text(json.dumps(runtime), encoding="utf-8")
+        os.replace(temporary, target)
+    except OSError:
+        log.exception("Pending batches cleared, but DAQ status could not be updated")
+    return {**result, "pending_batches": 0, "spool_bytes": spool_bytes}
 
 
 class ProductionPipeline:

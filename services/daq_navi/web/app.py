@@ -30,7 +30,8 @@ if PROJECT_ROOT not in sys.path:
 
 from daq_navi.core.config_loader import DaqNaviConfig
 from daq_navi.core.production_acquisition import (
-    TimescaleProductionDestination, validate_production_config,
+    AcquisitionFault, DurableSpool, TimescaleProductionDestination,
+    validate_production_config,
 )
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
@@ -68,6 +69,7 @@ PROC_ROOT = Path('/proc')
 tail_thread = None
 stop_tail_event = threading.Event()
 last_stats = {}
+_clear_processes = {}
 
 def read_config():
     """Reads configuration parameters from config.json."""
@@ -194,7 +196,11 @@ def acquisition_mode_for_pid(pid):
     script = arguments[1].decode(errors='replace')
     if script == os.path.join(CORE_DIR, 'mockup_stream_to_db.py'):
         return 'mockup'
-    if script == os.path.join(CORE_DIR, 'stream_to_db.py'):
+    # A process started before the script rename may still be running.
+    if script in (
+        os.path.join(CORE_DIR, 'buffered_daq_to_timescaledb.py'),
+        os.path.join(CORE_DIR, 'stream_to_db.py'),
+    ):
         for index, argument in enumerate(arguments[:-1]):
             if argument == b'--config' and arguments[index + 1] == os.fsencode(CONFIG_PATH):
                 return 'production'
@@ -634,6 +640,7 @@ def get_status():
     runtime = read_runtime_status(config) if mode_val == 'production' else {}
     stale_pid = os.path.exists(PID_PATH) and not is_running
     fault = runtime.get('last_fault') or ('acquisition_process_exited' if stale_pid else None)
+    writer_error = runtime.get('last_writer_error') if is_running else None
     expected = mode_val == 'production' and (
         bool(config.get('AUTO_START_ON_STARTUP', False)) or os.path.exists(PID_PATH))
     fresh = time.time_ns() - runtime.get('checked_at_ns', 0) < 10_000_000_000
@@ -642,21 +649,21 @@ def get_status():
         'port': 8081,
         'is_running': is_running,
         'status': ('faulted' if fault else
-                   'buffering' if is_running and runtime.get('last_writer_error') else
+                   'buffering' if writer_error else
                    'running' if is_running else 'stopped'),
         'mode': mode_val,
         'run_mode': mode_val,
         'pid': pid,
         'destination': dest,
         'expected_running': expected,
-        'healthy': (not fault and not runtime.get('last_writer_error') and
+        'healthy': (not fault and not writer_error and
                     (not expected or (is_running and fresh and runtime.get('state') == 'running'))),
         'fault': fault,
         'pending_batches': runtime.get('pending_batches', 0),
         'pending_bytes': runtime.get('pending_bytes', 0),
         'spool_bytes': runtime.get('spool_bytes', 0),
         'last_sample_ns': runtime.get('last_sample_ns'),
-        'writer_error': runtime.get('last_writer_error'),
+        'writer_error': writer_error,
         'gaps': read_recent_gaps(config),
         'retention_days': config.get('DB_RETENTION_DAYS', 30),
     }
@@ -778,12 +785,15 @@ def start_acquisition(mode=None):
     if pid is not None:
         return {'started': False, 'message': 'Acquisition is already running'}
     config = read_config()
+    clear_job = read_clear_job(Path(config.get('SPOOL_DIR', '/var/lib/daq_navi/spool')))
+    if clear_job.get('state') in ('starting', 'running'):
+        return {'started': False, 'message': 'Wait for pending data clearing to finish'}
     if mode == 'production':
         try:
             validate_production_config(DaqNaviConfig(config, allow_env_overrides=False))
         except (ValueError, TypeError, KeyError) as exc:
             return {'started': False, 'message': str(exc)}
-    script = 'stream_to_db.py' if mode == 'production' else 'mockup_stream_to_db.py'
+    script = 'buffered_daq_to_timescaledb.py' if mode == 'production' else 'mockup_stream_to_db.py'
     args = [sys.executable, os.path.join(CORE_DIR, script)]
     if mode == 'production':
         args += ['--config', CONFIG_PATH]
@@ -852,6 +862,73 @@ def stop_acquisition(manual=True):
 def api_stop():
     result = stop_acquisition(manual=True)
     return jsonify(result), 200 if result['stopped'] else 503
+
+
+def read_clear_job(directory):
+    for job_id, process in list(_clear_processes.items()):
+        if process.poll() is not None:
+            _clear_processes.pop(job_id, None)
+    try:
+        job = json.loads((directory / 'buffer-clear-job.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {'state': 'idle'}
+    if job.get('state') in ('starting', 'running'):
+        pid = job.get('pid')
+        if pid:
+            try:
+                os.kill(pid, 0)
+            except (OSError, ValueError):
+                job = {**job, 'state': 'failed', 'message': 'Buffer clear process exited'}
+        elif time.time_ns() - job.get('checked_at_ns', 0) > 10_000_000_000:
+            job = {**job, 'state': 'failed', 'message': 'Buffer clear process did not start'}
+    return job
+
+
+@app.route('/api/buffer/clear', methods=['GET', 'POST'])
+def api_clear_buffer():
+    settings = read_config()
+    directory = Path(settings.get('SPOOL_DIR', '/var/lib/daq_navi/spool'))
+    if request.method == 'GET':
+        return jsonify(read_clear_job(directory))
+    if (request.get_json(silent=True) or {}).get('confirm') != 'CLEAR BUFFER':
+        return jsonify({'message': 'Confirm with CLEAR BUFFER to discard pending data'}), 400
+    if get_running_process()[0] is not None:
+        return jsonify({'message': 'Stop acquisition before clearing the buffer'}), 409
+    if not directory.exists():
+        return jsonify({'cleared_batches': 0, 'cleared_samples': 0,
+                        'cleared_bytes': 0, 'recorded_gaps': 0,
+                        'pending_batches': 0, 'spool_bytes': 0})
+    if read_clear_job(directory).get('state') in ('starting', 'running'):
+        return jsonify({'message': 'Buffer clearing is already in progress'}), 409
+    max_bytes = int(settings.get('SPOOL_MAX_BYTES', 128 * 1024**3))
+    try:
+        spool = DurableSpool(directory, max_bytes)
+        spool.close()
+    except AcquisitionFault:
+        return jsonify({'message': 'Acquisition is using the buffer; stop it first'}), 409
+    except Exception:
+        app.logger.exception('Could not open DAQ buffer')
+        return jsonify({'message': 'Could not open DAQ buffer'}), 500
+
+    job_id = str(uuid.uuid4())
+    job_path = directory / 'buffer-clear-job.json'
+    try:
+        job_path.write_text(json.dumps({'job_id': job_id, 'state': 'starting',
+                                        'checked_at_ns': time.time_ns()}), encoding='utf-8')
+        with open(LOG_PATH, 'a', encoding='utf-8') as output:
+            process = subprocess.Popen(
+                [sys.executable, os.path.join(CORE_DIR, 'clear_spool.py'),
+                 str(directory), str(max_bytes), job_id],
+                stdout=output, stderr=subprocess.STDOUT,
+                close_fds=sys.platform != 'win32',
+            )
+            _clear_processes[job_id] = process
+    except OSError:
+        app.logger.exception('Could not start DAQ buffer clear process')
+        job_path.write_text(json.dumps({'job_id': job_id, 'state': 'failed',
+                                        'message': 'Could not start buffer clear process'}), encoding='utf-8')
+        return jsonify({'message': 'Could not start buffer clear process'}), 500
+    return jsonify({'job_id': job_id, 'state': 'starting'}), 202
 
 def init_application():
     """Initial recovery check on Web GUI startup."""

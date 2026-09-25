@@ -145,7 +145,7 @@ class TestDockerComposeStack(unittest.TestCase):
             ep_content = f.read()
         self.assertIn("MOCKUP_MODE", ep_content)
         self.assertIn("mockup_stream_to_db.py", ep_content)
-        self.assertIn("stream_to_db.py", ep_content)
+        self.assertIn("buffered_daq_to_timescaledb.py", ep_content)
 
     def test_config_loader_env_overrides(self):
         config_path = os.path.join(SERVICE_DIR, "config.json")

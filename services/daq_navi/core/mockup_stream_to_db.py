@@ -30,7 +30,7 @@ for p in (CORE_DIR, SERVICE_DIR):
 
 try:
     from .config_loader import load_daq_config
-    from .stream_to_db import (
+    from .buffered_daq_to_timescaledb import (
         Calibrator,
         DaqSampleParser,
         ensure_db_and_tables,
@@ -42,7 +42,7 @@ try:
     )
 except ImportError:
     from config_loader import load_daq_config
-    from stream_to_db import (
+    from buffered_daq_to_timescaledb import (
         Calibrator,
         DaqSampleParser,
         ensure_db_and_tables,

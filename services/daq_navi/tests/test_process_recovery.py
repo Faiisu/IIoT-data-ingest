@@ -23,7 +23,7 @@ class ProcessRecoveryTests(unittest.TestCase):
             child.parent.mkdir(parents=True)
             child.write_bytes(
                 b'/usr/local/bin/python3\0' +
-                str(Path(web.CORE_DIR) / 'stream_to_db.py').encode() + b'\0'
+                str(Path(web.CORE_DIR) / 'buffered_daq_to_timescaledb.py').encode() + b'\0'
                 b'--config\0' + str(root / 'config.json').encode() + b'\0')
 
             with patch.object(web, 'PID_PATH', str(root / 'acquisition.pid')), \
