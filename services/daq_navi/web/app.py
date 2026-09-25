@@ -20,7 +20,7 @@ import tempfile
 import math
 import uuid
 from pathlib import Path
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, redirect, url_for
 from flask_socketio import SocketIO, emit
 
 
@@ -406,6 +406,10 @@ def scan_host_usb_devices():
 @app.route('/')
 def home():
     return render_template('index.html')
+
+@app.route('/favicon.ico')
+def favicon():
+    return redirect(url_for('static', filename='config_center/favicon.svg'))
 
 @app.route('/api/config', methods=['GET'])
 def get_config():

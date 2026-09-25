@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#004280">
   <title>DAQ Config Center</title>
+  <link rel="icon" href="/static/config_center/favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -47,7 +48,7 @@
         <article class="metric-card"><div class="metric-label">DAQ DEVICE</div><strong id="summary-device">—</strong><small id="summary-device-id">Device identifier</small></article>
         <article class="metric-card"><div class="metric-label">ACTIVE CHANNELS</div><strong id="summary-channels">—</strong><small id="summary-channel-span">Configured channel span</small></article>
         <article class="metric-card"><div class="metric-label">SAMPLE RATE</div><strong id="summary-rate">—</strong><small>Per channel</small></article>
-        <article class="metric-card"><div class="metric-label">PENDING DATA</div><strong id="summary-pending">—</strong><small id="summary-spool">Local spool usage</small></article>
+        <article class="metric-card pending-card"><div class="metric-label">PENDING DATA</div><strong id="summary-pending">—</strong><small id="summary-spool">Local spool usage</small><div class="pending-trend" aria-live="polite"><div class="pending-rates"><span id="pending-rise" class="pending-rise" title="Increase rate">↑ —</span><span id="pending-fall" class="pending-fall" title="Decrease rate">↓ —</span></div><small id="pending-net">Waiting for next reading</small></div></article>
       </section>
       <div id="page-message" class="page-message" role="status" aria-live="polite"></div>
 

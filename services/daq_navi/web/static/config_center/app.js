@@ -8,6 +8,8 @@ let dirty = false;
 let running = false;
 let manualDsn = false;
 let validationVisible = false;
+let pendingSamples = [];
+const pendingWindowMs = 60000;
 
 const defaultChannel = () => ({enabled: false, label: '', unit: '', signal_type: 'SingleEnded', value_range: 'V_0To5', scale: {enabled: false, low_voltage: 0, high_voltage: 5, low_value: 0, high_value: 100, revision: ''}});
 
@@ -447,8 +449,10 @@ async function refreshStatus() {
     $('stop-acquisition').disabled = !running;
     $('runtime-description').textContent = running ? `Acquisition is ${state}.` : 'Acquisition is stopped.';
     $('runtime-message').textContent = status.writer_error || status.fault || (running ? 'Samples are being acquired by the DAQ service.' : 'Start only after verifying the device, wiring, and destination.');
+    const pending = Number(status.pending_batches);
     $('summary-pending').textContent = String(status.pending_batches ?? 0);
     $('buffer-batches').textContent = String(status.pending_batches ?? 0);
+    updatePendingTrend(pending);
     const bytes = Number(status.spool_bytes || status.pending_bytes || 0);
     const capacity = Number(config.SPOOL_MAX_BYTES || 0);
     $('summary-spool').textContent = `${formatBytes(bytes)} local spool used`;
@@ -458,6 +462,8 @@ async function refreshStatus() {
     $('info-last-sample').textContent = status.last_sample_ns ? new Date(Number(status.last_sample_ns) / 1e6).toLocaleTimeString() : 'No recent sample';
     if (!response.ok && status.fault) throw new Error(status.fault);
   } catch (error) {
+    pendingSamples = [];
+    setPendingTrend('↑ —', '↓ —', 'Rate unavailable');
     running = false;
     $('side-status').textContent = 'Service unavailable';
     $('side-detail').textContent = 'Could not reach DAQ API';
@@ -469,6 +475,78 @@ async function refreshStatus() {
     $('runtime-description').textContent = 'DAQ service unavailable.';
     $('runtime-message').textContent = 'Check the DAQ service before controlling acquisition.';
   }
+}
+function pendingTrendElements() {
+  const card = $('summary-pending')?.closest('.metric-card');
+  if (!card) return null;
+  card.classList.add('pending-card');
+  const rise = $('pending-rise');
+  const fall = $('pending-fall');
+  const net = $('pending-net');
+  if (rise && fall && net) return {rise, fall, net};
+
+  // The server may still serve a cached template after the static script updates.
+  const trend = card.querySelector('.pending-trend') || document.createElement('div');
+  trend.className = 'pending-trend';
+  trend.setAttribute('aria-live', 'polite');
+  const rates = document.createElement('div');
+  rates.className = 'pending-rates';
+  const increase = document.createElement('span');
+  increase.id = 'pending-rise';
+  increase.className = 'pending-rise';
+  increase.title = 'Increase rate';
+  const decrease = document.createElement('span');
+  decrease.id = 'pending-fall';
+  decrease.className = 'pending-fall';
+  decrease.title = 'Decrease rate';
+  const summary = document.createElement('small');
+  summary.id = 'pending-net';
+  rates.append(increase, decrease);
+  trend.replaceChildren(rates, summary);
+  card.append(trend);
+  return {rise: increase, fall: decrease, net: summary};
+}
+function setPendingTrend(rise, fall, net) {
+  const elements = pendingTrendElements();
+  if (!elements) return;
+  elements.rise.textContent = rise;
+  elements.fall.textContent = fall;
+  elements.net.textContent = net;
+}
+function formatBatchRate(rate) {
+  return new Intl.NumberFormat(undefined, {maximumFractionDigits: 1}).format(rate);
+}
+function updatePendingTrend(pending) {
+  if (!Number.isSafeInteger(pending) || pending < 0) {
+    pendingSamples = [];
+    setPendingTrend('↑ —', '↓ —', 'Rate unavailable');
+    return;
+  }
+  const now = performance.now();
+  if (pendingSamples.length && now - pendingSamples[pendingSamples.length - 1].time > pendingWindowMs) pendingSamples = [];
+  pendingSamples.push({time: now, count: pending});
+  const cutoff = now - pendingWindowMs;
+  while (pendingSamples.length > 1 && pendingSamples[1].time <= cutoff) pendingSamples.shift();
+  if (pendingSamples.length < 2 || now === pendingSamples[0].time) {
+    setPendingTrend('↑ —', '↓ —', 'Waiting for next reading');
+    return;
+  }
+  let rise = 0;
+  let fall = 0;
+  for (let i = 1; i < pendingSamples.length; i++) {
+    const previous = pendingSamples[i - 1];
+    const current = pendingSamples[i];
+    const duration = current.time - previous.time;
+    if (duration <= 0) continue;
+    const fraction = (current.time - Math.max(previous.time, cutoff)) / duration;
+    const change = (current.count - previous.count) * fraction;
+    if (change > 0) rise += change;
+    else fall -= change;
+  }
+  const seconds = Math.min(pendingWindowMs, now - pendingSamples[0].time) / 1000;
+  const factor = 60 / seconds;
+  const net = (rise - fall) * factor;
+  setPendingTrend(`↑ ${formatBatchRate(rise * factor)}/min`, `↓ ${formatBatchRate(fall * factor)}/min`, `Net ${net > 0 ? '+' : ''}${formatBatchRate(net)}/min · ${Math.round(seconds)}s observed`);
 }
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -567,6 +645,14 @@ document.querySelectorAll('.side-nav a').forEach((link) => link.addEventListener
   link.classList.add('active');
 }));
 
+if (!document.querySelector('link[rel="icon"]')) {
+  const icon = document.createElement('link');
+  icon.rel = 'icon';
+  icon.type = 'image/svg+xml';
+  icon.href = '/static/config_center/favicon.svg';
+  document.head.append(icon);
+}
+setPendingTrend('↑ —', '↓ —', 'Waiting for next reading');
 loadConfig().then(refreshStatus).catch((error) => {
   setMessage(`Could not load the saved DAQ configuration: ${error.message}`, 'error');
   $('last-saved').textContent = 'Configuration unavailable';

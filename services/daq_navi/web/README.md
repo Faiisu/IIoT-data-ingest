@@ -11,4 +11,6 @@ The DAQ Navi Flask service serves the Config Center at port `8081`. Its REST API
 
 Configuration errors appear in the header of the section that contains them, with details directly below that header. The page scrolls to the first affected section after an unsuccessful save.
 
+The **Pending data** card shows the current pending batch count and observed increase, decrease, and net rates in batches per minute. The page samples `/api/status` every five seconds and calculates these rates over the most recent 60 seconds (or the time observed so far). The separate increase and decrease rates expose fluctuations that a net rate alone would hide. Rates restart after a status request fails or the page reloads; changes between polls cannot be measured.
+
 In development mode, Compose mounts `services/daq_navi` into the DAQ container. Static asset edits become visible immediately. Restart `daq-navi` after changing the page template if its Flask process has cached the template.
