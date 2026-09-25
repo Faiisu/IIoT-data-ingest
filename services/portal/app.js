@@ -19,9 +19,11 @@ if (document.readyState === 'loading') {
     initApp();
 }
 
-function initApp() {
+async function initApp() {
     updateClock();
     setInterval(updateClock, 1000);
+
+    await loadPortalConfig();
 
     // Dynamically resolve target hostnames for LAN deployments
     resolveHostnames();
@@ -32,6 +34,26 @@ function initApp() {
     // Initial service health poll and interval registration (every 4s)
     pollServices();
     setInterval(pollServices, 4000);
+}
+
+async function loadPortalConfig() {
+    try {
+        const response = await fetch('config.json', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const ports = await response.json();
+        EDGE_SERVICES.forEach(service => {
+            const configuredPort = ports[service.id];
+            if (!Number.isInteger(configuredPort) || configuredPort < 1 || configuredPort > 65535) return;
+            service.port = String(configuredPort);
+            const row = document.getElementById(service.rowId);
+            const link = row && row.closest('.module-portal-link');
+            if (link) link.setAttribute('data-port', service.port);
+            const badge = row && row.querySelector('.status-badge');
+            if (badge) badge.innerHTML = `<span class="badge-dot"></span>PORT_${service.port}: OFFLINE`;
+        });
+    } catch (error) {
+        console.warn('Using default Portal service ports:', error);
+    }
 }
 
 // Helper to construct service base URL from current window location

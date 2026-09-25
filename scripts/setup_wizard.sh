@@ -499,9 +499,17 @@ if command -v docker >/dev/null 2>&1; then
 fi
 pause "Stage 4 finished. Press Enter to proceed to configuration customization."
 
-# ── Stage 5: Configuration Customization (config.json & .env) ──────────────
+# ── Stage 5: Configuration Customization (service-owned files) ──────────────
 stage "Configuration Customization"
 say "Customizing DAQ Navi acquisition parameters, database host, and credentials."
+
+INFRA_ENV_FILE="$ENV_FILE"
+[[ "$INFRA_ENV_FILE" == /* ]] || INFRA_ENV_FILE="$PROJECT_ROOT/$INFRA_ENV_FILE"
+[[ -f "$INFRA_ENV_FILE" ]] || cp "$PROJECT_ROOT/.env.example" "$INFRA_ENV_FILE"
+[[ -f "$PROJECT_ROOT/deploy/daq-navi/.env" ]] || cp "$PROJECT_ROOT/deploy/daq-navi/.env.example" "$PROJECT_ROOT/deploy/daq-navi/.env"
+[[ -f "$PROJECT_ROOT/deploy/portal/.env" ]] || cp "$PROJECT_ROOT/deploy/portal/.env.example" "$PROJECT_ROOT/deploy/portal/.env"
+chmod 600 "$INFRA_ENV_FILE" "$PROJECT_ROOT/deploy/daq-navi/.env" "$PROJECT_ROOT/deploy/portal/.env"
+ENV_FILE="$PROJECT_ROOT/deploy/daq-navi/.env"
 
 DETECTED_DESC="PCI-1716,BID#0"
 if [[ -x /opt/advantech/tools/dev_enum ]]; then
@@ -531,8 +539,20 @@ CLOCK_RATE="${CLOCK_RATE:-2000}"
 ask DESTINATION "Telemetry Destination (postgresql|mqtt|influxdb) [postgresql]:"
 DESTINATION="${DESTINATION:-postgresql}"
 
-ask DB_HOST "TimescaleDB / PostgreSQL Hostname [localhost]:"
-DB_HOST="${DB_HOST:-localhost}"
+ask DAQ_PORT "DAQ web host port [8081]:"
+DAQ_PORT="${DAQ_PORT:-8081}"
+write_env "DAQ_PORT" "$DAQ_PORT"
+
+ENV_FILE="$PROJECT_ROOT/deploy/portal/.env"
+ask PORTAL_PORT "Portal host port [8080]:"
+PORTAL_PORT="${PORTAL_PORT:-8080}"
+write_env "PORTAL_PORT" "$PORTAL_PORT"
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["daq"]=int(sys.argv[2]); open(p,"w").write(json.dumps(d,indent=2)+"\n")' \
+  "$PROJECT_ROOT/services/portal/config.json" "$DAQ_PORT" || warn "Could not update Portal DAQ link port"
+
+ENV_FILE="$INFRA_ENV_FILE"
+ask DB_HOST "TimescaleDB / PostgreSQL hostname for DAQ [timescaledb]:"
+DB_HOST="${DB_HOST:-timescaledb}"
 
 ask DB_PORT "TimescaleDB / PostgreSQL Port [5432]:"
 DB_PORT="${DB_PORT:-5432}"
@@ -549,19 +569,13 @@ POSTGRES_DB="${POSTGRES_DB:-daq_db}"
 ask MOCKUP_MODE "Run in Mockup Mode (true/false) [$DEFAULT_MOCKUP]:"
 MOCKUP_MODE="${MOCKUP_MODE:-$DEFAULT_MOCKUP}"
 
-# Write to .env
-say "Writing environment variables to $ENV_FILE..."
-write_env "DEVICE_DESCRIPTION" "$DEVICE_DESCRIPTION"
-write_env "DEVICE_ID" "$DEVICE_ID"
-write_env "CHANNEL_COUNT" "$CHANNEL_COUNT"
-write_env "CLOCK_RATE" "$CLOCK_RATE"
-write_env "DESTINATION" "$DESTINATION"
-write_env "DB_HOST" "$DB_HOST"
+# Write infrastructure settings only to the root .env. DAQ acquisition
+# settings are saved in its config.json below.
+say "Writing infrastructure variables to $ENV_FILE..."
 write_env "DB_PORT" "$DB_PORT"
 write_env "POSTGRES_USER" "$POSTGRES_USER"
 write_env "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
 write_env "POSTGRES_DB" "$POSTGRES_DB"
-write_env "MOCKUP_MODE" "$MOCKUP_MODE"
 
 # Sync parameters safely with services/daq_navi/config.json via argv
 if [[ -f "$DAQ_CONFIG_JSON" ]] && ! python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("_WEB_MANAGED") else 1)' "$DAQ_CONFIG_JSON"; then
@@ -599,7 +613,7 @@ pause "Stage 5 finished. Press Enter to proceed to stack launch and verification
 
 # ── Stage 6: Stack Launch and Verification ────────────────────────────────
 stage "Stack Launch & Service Verification"
-say "Deploying the complete IIoT data ingestion stack via Docker Compose."
+say "Deploying infrastructure, DAQ Navi, and Portal independently via Docker Compose."
 
 say "Configuration Summary:"
 note "  • Mode        : $([[ "$MOCKUP_MODE" == "true" ]] && echo "MOCKUP (Driverless Simulation)" || echo "REAL HARDWARE (Advantech PCI-1716)")"
@@ -610,13 +624,21 @@ note "  • Database    : $POSTGRES_DB ($DB_HOST:$DB_PORT, user: $POSTGRES_USER)
 COMPOSE_CMD="$(get_compose_cmd)"
 
 if [[ -n "$COMPOSE_CMD" ]]; then
-  if confirm "Start the production stack now ($COMPOSE_CMD up -d)?"; then
-    say "Launching containers in detached mode..."
-    if $COMPOSE_CMD -f "$PROJECT_ROOT/docker-compose.yml" up -d; then
+  OLD_DAQ_PROJECT="$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' daq_navi 2>/dev/null || true)"
+  OLD_PORTAL_PROJECT="$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' daq_portal 2>/dev/null || true)"
+  if [[ "$OLD_DAQ_PROJECT" == "iiot-data-ingest" || "$OLD_PORTAL_PROJECT" == "iiot-data-ingest" ]]; then
+    warn "The former combined Compose project still owns DAQ or Portal containers."
+    say "Stop acquisition and follow the cutover steps in DEPLOY_LINUX.md before starting the independent projects."
+  elif confirm "Start the three Compose projects now?"; then
+    say "Launching infrastructure, DAQ Navi, and Portal..."
+    if $COMPOSE_CMD --env-file "$INFRA_ENV_FILE" -f "$PROJECT_ROOT/docker-compose.yml" up -d &&
+       docker volume create iiot-data-ingest_daq_spool >/dev/null &&
+       $COMPOSE_CMD --env-file "$PROJECT_ROOT/deploy/daq-navi/.env" -f "$PROJECT_ROOT/deploy/daq-navi/compose.yml" up -d --build &&
+       $COMPOSE_CMD --env-file "$PROJECT_ROOT/deploy/portal/.env" -f "$PROJECT_ROOT/deploy/portal/compose.yml" up -d; then
       say "Waiting for containers to initialize and report healthy..."
       ALL_HEALTHY=false
       for ((i=1; i<=15; i++)); do
-        UNHEALTHY="$($COMPOSE_CMD -f "$PROJECT_ROOT/docker-compose.yml" ps 2>/dev/null | grep -iE 'unhealthy|Exit [1-9]' || true)"
+        UNHEALTHY="$($COMPOSE_CMD --env-file "$PROJECT_ROOT/deploy/daq-navi/.env" -f "$PROJECT_ROOT/deploy/daq-navi/compose.yml" ps 2>/dev/null | grep -iE 'unhealthy|Exit [1-9]' || true)"
         if [[ -z "$UNHEALTHY" ]]; then
           ALL_HEALTHY=true
           break
@@ -624,29 +646,31 @@ if [[ -n "$COMPOSE_CMD" ]]; then
         sleep 1
       done
 
-      $COMPOSE_CMD -f "$PROJECT_ROOT/docker-compose.yml" ps
+      $COMPOSE_CMD --env-file "$INFRA_ENV_FILE" -f "$PROJECT_ROOT/docker-compose.yml" ps
+      $COMPOSE_CMD --env-file "$PROJECT_ROOT/deploy/daq-navi/.env" -f "$PROJECT_ROOT/deploy/daq-navi/compose.yml" ps
+      $COMPOSE_CMD --env-file "$PROJECT_ROOT/deploy/portal/.env" -f "$PROJECT_ROOT/deploy/portal/compose.yml" ps
 
       if [[ "$ALL_HEALTHY" == "true" ]]; then
         say "✓ All containers are operational and healthy."
         say "Service Endpoints:"
-        note "  • Ingestion Portal    : http://localhost:8080"
+        note "  • Ingestion Portal    : http://localhost:$PORTAL_PORT"
         note "  • TimescaleDB         : $DB_HOST:$DB_PORT (DB: $POSTGRES_DB)"
         note "  • Mosquitto MQTT      : localhost:1883"
         note "  • InfluxDB Web UI     : http://localhost:8086"
       else
         warn "Some containers reported unhealthy or exited status."
-        say "Troubleshooting: inspect container logs with: $COMPOSE_CMD logs"
+        say "Troubleshooting: inspect each project's Compose logs."
       fi
     else
       warn "Failed to bring up Docker Compose stack cleanly."
       say "Troubleshooting & Recovery Steps:"
-      step "1. Inspect container logs: $COMPOSE_CMD logs -f daq-navi"
+      step "1. Inspect DAQ logs: $COMPOSE_CMD --env-file deploy/daq-navi/.env -f deploy/daq-navi/compose.yml logs -f daq-navi"
       step "2. Check database container: $COMPOSE_CMD logs timescaledb"
       step "3. Verify port conflicts on host: sudo lsof -i :8080 -i :5432 -i :1883 -i :8086"
       step "4. Ensure Docker daemon is active: sudo systemctl restart docker"
     fi
   else
-    note "Stack start skipped. You can manually launch later with: docker compose up -d (or docker-compose up -d)"
+    note "Start later with docker compose up for infrastructure, then each deploy/*/compose.yml project."
   fi
 else
   warn "Docker Compose is not available. Please install Docker Compose to start containers (docker compose up -d)."

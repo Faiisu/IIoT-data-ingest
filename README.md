@@ -1,6 +1,6 @@
 # IIoT-data-ingestion
 
-IIoT-data-ingestion is the umbrella name for the industrial data ingestion services in this repository. The current Docker Compose stack runs DAQ Navi, its Config Center, a Portal, and shared infrastructure. MUSASHI II and MUSASHI IV are included as separate services but are not started by this Compose file.
+IIoT-data-ingestion is the umbrella name for the industrial data ingestion services in this repository. The infrastructure, DAQ Navi, and Portal have separate Compose projects. MUSASHI II and MUSASHI IV are separate services and are not started by these Compose files.
 
 ## Deploy on Linux
 
@@ -10,40 +10,45 @@ Use a Linux host with Docker Engine and the Docker Compose plugin. Physical DAQ 
 
 ```bash
 cp .env.example .env
-# Edit .env: replace the example database and InfluxDB passwords and tokens.
+cp deploy/daq-navi/.env.example deploy/daq-navi/.env
+cp deploy/portal/.env.example deploy/portal/.env
+# Edit .env for infrastructure credentials, and the two service files for host ports.
 ```
 
 Review [the saved DAQ configuration](services/daq_navi/config.json) or open the Config Center before collecting data. Its checked-in device, channel, calibration, and destination values are machine-specific examples. Keep database credentials in the saved DAQ configuration consistent with those in `.env`. The service may begin acquisition when it starts if `AUTO_START_ON_STARTUP` is enabled.
 
 If the TimescaleDB volume already exists, changing `POSTGRES_PASSWORD` in `.env` alone does not change the password of the existing database user. Update that user in PostgreSQL and the DAQ destination configuration together.
 
-### 2. Start the stack
+### 2. Start the services
 
-The default command loads both `docker-compose.yml` and `docker-compose.override.yml`. The override bind-mounts the DAQ source for development. Restart `daq-navi` if a Python or template change is not visible.
+Start the infrastructure first. DAQ Navi joins its Docker network and reuses the existing `iiot-data-ingest_daq_spool` volume. On a new host, create that volume once before starting DAQ. Existing combined-stack installations must follow the [cutover steps](DEPLOY_LINUX.md#cutover-from-the-former-combined-stack) before starting independent DAQ and Portal containers. The saved DAQ configuration must use `timescaledb` as its database host when writing to this infrastructure project.
 
 ```bash
-docker compose up -d --build
-docker compose ps
+docker compose -f docker-compose.yml up -d
+docker volume create iiot-data-ingest_daq_spool
+docker compose --env-file deploy/daq-navi/.env -f deploy/daq-navi/compose.yml up -d --build
+docker compose --env-file deploy/portal/.env -f deploy/portal/compose.yml up -d
+docker compose --env-file deploy/daq-navi/.env -f deploy/daq-navi/compose.yml ps
 curl http://localhost:8081/api/health
 ```
 
-To use only the base Compose file, without the development override:
+For local DAQ source mounts and Flask debugging, add the DAQ development override:
 
 ```bash
-docker compose -f docker-compose.yml up -d --build
+docker compose --env-file deploy/daq-navi/.env -f deploy/daq-navi/compose.yml -f deploy/daq-navi/compose.dev.yml up -d --build
 ```
 
 Open the Portal at `http://<linux-host>:8080` and the DAQ Config Center at `http://<linux-host>:8081`. The DAQ REST API uses port 8081 as well.
 
-| Compose service | Default host port | Role |
+| Compose project / service | Default host port | Role |
 |:---|---:|:---|
-| `portal` | 8080 | Service links and browser-side status polling. |
-| `daq-navi` | 8081 | DAQ Config Center, API, and acquisition control. |
-| `timescaledb` | 5432 | PostgreSQL/TimescaleDB destination. |
-| `mqtt-broker` | 1883 | Mosquitto for configured MQTT paths. |
-| `influxdb` | 8086 | InfluxDB for configured InfluxDB paths. |
+| `deploy/portal/compose.yml` / `portal` | 8080 | Service links and browser-side status polling. |
+| `deploy/daq-navi/compose.yml` / `daq-navi` | 8081 | DAQ Config Center, API, and acquisition control. |
+| `docker-compose.yml` / `timescaledb` | 5432 | PostgreSQL/TimescaleDB destination. |
+| `docker-compose.yml` / `mqtt-broker` | 1883 | Mosquitto for configured MQTT paths. |
+| `docker-compose.yml` / `influxdb` | 8086 | InfluxDB for configured InfluxDB paths. |
 
-The Portal also links to MUSASHI II on port 8082 and MUSASHI IV on port 8083. Those services need separate deployment; they will not appear in `docker compose ps`. Host ports can be changed with `PORTAL_PORT`, `DAQ_PORT`, `DB_PORT`, `MQTT_PORT`, and `INFLUX_PORT`.
+The Portal also links to MUSASHI II on port 8082 and MUSASHI IV on port 8083. Those services need separate deployment. Set `PORTAL_PORT` in `deploy/portal/.env`, `DAQ_PORT` in `deploy/daq-navi/.env`, and infrastructure ports in the root `.env`. Portal link and polling ports are owned by `services/portal/config.json`; update its `daq` entry if the DAQ host port changes.
 
 ### 3. Start acquisition and check delivery
 
@@ -52,12 +57,12 @@ For physical acquisition, confirm the DAQ card is visible on the Linux host. In 
 ```bash
 curl http://localhost:8081/api/status
 curl 'http://localhost:8081/api/samples?channel=0'
-docker compose logs -f daq-navi
+docker compose --env-file deploy/daq-navi/.env -f deploy/daq-navi/compose.yml logs -f daq-navi
 ```
 
 Use an enabled channel number in the sample URL. In the status response, inspect `status`, `healthy`, `writer_error`, `pending_batches`, and `last_sample_ns`. A queue can grow briefly while the writer catches up; a persistent increase needs investigation. Confirm that recent samples reach the intended table. An API health response alone does not establish end-to-end delivery.
 
-The web interfaces have no built-in authentication. Limit access to a trusted network or add access control before wider exposure. [Linux deployment](DEPLOY_LINUX.md) describes host mounts, port exposure, lifecycle commands, and optional setup helpers. `docker compose down` preserves named database and spool volumes; `docker compose down -v` deletes them.
+The web interfaces have no built-in authentication. Limit access to a trusted network or add access control before wider exposure. [Linux deployment](DEPLOY_LINUX.md) describes host mounts, port exposure, lifecycle commands, and cutover from the former combined stack. Avoid `docker compose down -v` when preserving database or spool data.
 
 ## Architecture
 
@@ -108,7 +113,7 @@ The DAQ web service reads and writes [`services/daq_navi/config.json`](services/
 | `SPOOL_DIR`, `SPOOL_MAX_BYTES` | Persistent production queue and its configured byte limit. |
 | `AUTO_START_ON_STARTUP`, `AUTO_START_MODE` | Whether service startup begins acquisition and which mode to use. |
 
-Compose `.env` configures container startup, published ports, and infrastructure credentials. The saved DAQ JSON remains authoritative for DAQ acquisition settings after initial setup; changing `.env` does not rewrite saved destination or channel settings. See the [Config Center workflow](services/daq_navi/web/README.md) for channel editing and calibration.
+The root Compose `.env` configures infrastructure credentials and ports. `deploy/daq-navi/.env` and `deploy/portal/.env` configure their host ports. The saved DAQ JSON remains authoritative for acquisition settings and destination credentials. See the [Config Center workflow](services/daq_navi/web/README.md) for channel editing and calibration.
 
 ### Production data path
 
@@ -128,8 +133,8 @@ DAQ mockup acquisition generates synthetic values and uses its configured destin
 
 | Path | Contents |
 |:---|:---|
-| `docker-compose.yml`, `docker-compose.override.yml` | Base stack and development bind mounts. |
-| `services/portal/` | Static Portal frontend. |
+| `docker-compose.yml`, `deploy/daq-navi/`, `deploy/portal/` | Infrastructure and independent DAQ/Portal Compose projects. |
+| `services/portal/` | Static Portal frontend and its service-link configuration. |
 | `references/advantech_sdk/`, `docs/hardware/` | Vendor examples and hardware references; see the [third-party provenance inventory](docs/third-party-provenance.md) for notices and redistribution status. |
 | `services/daq_navi/web/` | Config Center, REST API, and process control. |
 | `services/daq_navi/core/` | DAQ configuration loading, physical capture, spool, writer, and mockup acquisition. |

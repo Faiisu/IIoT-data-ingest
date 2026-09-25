@@ -3,12 +3,12 @@
 """
 test_docker_compose.py
 ───────────────────────
-Tests for Ticket 06: Docker Compose full stack deployment.
-- Verifies docker-compose.yml defines: timescaledb, mqtt-broker, influxdb, daq-navi, portal
+Tests for independent infrastructure, DAQ, and Portal Compose deployments.
+- Verifies docker-compose.yml defines: timescaledb, mqtt-broker, influxdb
 - Verifies TimescaleDB auto-initialization with db_setup.sql
 - Verifies daq-navi container: privileged, /dev, /usr/lib, /etc/biobdaq, config.json bind-mount
 - Verifies mosquitto.conf for anonymous local access
-- Verifies .env.example with all configurable credentials
+- Verifies each deployment has its own environment template
 - Verifies daq-navi Dockerfile and entrypoint script
 - Verifies config_loader environment variable overrides
 """
@@ -16,6 +16,7 @@ Tests for Ticket 06: Docker Compose full stack deployment.
 import os
 import sys
 import unittest
+from unittest.mock import patch
 import yaml
 
 SERVICE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -25,7 +26,7 @@ for p in (CORE_DIR, SERVICE_DIR, PROJECT_ROOT):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from config_loader import load_daq_config, DaqNaviConfig
+from config_loader import load_daq_config
 
 
 class TestDockerComposeStack(unittest.TestCase):
@@ -33,6 +34,8 @@ class TestDockerComposeStack(unittest.TestCase):
         self.project_root = PROJECT_ROOT
         self.compose_path = os.path.join(self.project_root, "docker-compose.yml")
         self.env_example_path = os.path.join(self.project_root, ".env.example")
+        self.daq_compose_path = os.path.join(self.project_root, "deploy", "daq-navi", "compose.yml")
+        self.portal_compose_path = os.path.join(self.project_root, "deploy", "portal", "compose.yml")
         self.mosquitto_conf_path = os.path.join(self.project_root, "config", "mosquitto", "mosquitto.conf")
         self.dockerfile_path = os.path.join(self.project_root, "services", "daq_navi", "Dockerfile")
         self.entrypoint_path = os.path.join(self.project_root, "services", "daq_navi", "entrypoint.sh")
@@ -48,9 +51,11 @@ class TestDockerComposeStack(unittest.TestCase):
         with open(self.compose_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
         services = data.get("services", {})
-        required = ["timescaledb", "mqtt-broker", "influxdb", "daq-navi", "portal"]
+        required = ["timescaledb", "mqtt-broker", "influxdb"]
         for req in required:
             self.assertIn(req, services, f"Required service '{req}' missing from docker-compose.yml")
+        self.assertNotIn("daq-navi", services)
+        self.assertNotIn("portal", services)
 
     def test_timescaledb_service_configuration(self):
         with open(self.compose_path, "r", encoding="utf-8") as f:
@@ -90,7 +95,7 @@ class TestDockerComposeStack(unittest.TestCase):
         self.assertTrue(has_port, "influxdb must expose port 8086")
 
     def test_daq_navi_service_configuration(self):
-        with open(self.compose_path, "r", encoding="utf-8") as f:
+        with open(self.daq_compose_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
         daq = data["services"]["daq-navi"]
         
@@ -103,9 +108,11 @@ class TestDockerComposeStack(unittest.TestCase):
         self.assertTrue(any("/usr/lib" in v for v in volumes), "daq-navi must mount /usr/lib")
         self.assertTrue(any("/etc/biobdaq" in v for v in volumes), "daq-navi must mount /etc/biobdaq")
         self.assertTrue(any("config.json" in v for v in volumes), "daq-navi must bind-mount config.json")
+        self.assertTrue(data["volumes"]["daq_spool"]["external"])
+        self.assertTrue(data["networks"]["infrastructure"]["external"])
 
     def test_portal_port(self):
-        with open(self.compose_path, "r", encoding="utf-8") as f:
+        with open(self.portal_compose_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
         portal = data["services"]["portal"]
         
@@ -124,13 +131,14 @@ class TestDockerComposeStack(unittest.TestCase):
         self.assertTrue(os.path.exists(self.env_example_path), f"Missing {self.env_example_path}")
         with open(self.env_example_path, "r", encoding="utf-8") as f:
             content = f.read()
-        required_keys = [
-            "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "DB_PORT",
-            "MQTT_PORT", "INFLUX_PORT", "INFLUX_TOKEN", "MOCKUP_MODE",
-            "DESTINATION", "PORTAL_PORT"
-        ]
-        for k in required_keys:
+        for k in ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "DB_PORT", "MQTT_PORT", "INFLUX_PORT", "INFLUX_TOKEN"]:
             self.assertIn(k, content, f"Missing key '{k}' in .env.example")
+        self.assertNotIn("MOCKUP_MODE", content)
+        self.assertNotIn("PORTAL_PORT", content)
+        for name, key in [("daq-navi", "DAQ_PORT"), ("portal", "PORTAL_PORT")]:
+            path = os.path.join(self.project_root, "deploy", name, ".env.example")
+            with open(path, "r", encoding="utf-8") as f:
+                self.assertIn(key, f.read())
 
     def test_daq_navi_dockerfile_and_entrypoint(self):
         self.assertTrue(os.path.exists(self.dockerfile_path), f"Missing {self.dockerfile_path}")
@@ -147,31 +155,19 @@ class TestDockerComposeStack(unittest.TestCase):
         self.assertIn("mockup_stream_to_db.py", ep_content)
         self.assertIn("buffered_daq_to_timescaledb.py", ep_content)
 
-    def test_config_loader_env_overrides(self):
+    def test_saved_daq_config_ignores_container_environment(self):
         config_path = os.path.join(SERVICE_DIR, "config.json")
         base_cfg = load_daq_config(config_path)
-
-        os.environ["MOCKUP_MODE"] = "true"
-        os.environ["DESTINATION"] = "mqtt"
-        os.environ["DB_DSN"] = "postgresql://test:test@timescaledb:5432/testdb"
-        os.environ["MQTT_BROKER"] = "broker.test.local"
-        os.environ["INFLUX_URL"] = "http://influxdb:8086"
-        os.environ["INFLUX_TOKEN"] = "token123"
-
-        try:
+        overrides = {
+            "MOCKUP_MODE": "true", "DESTINATION": "mqtt",
+            "DB_DSN": "postgresql://test:test@timescaledb:5432/testdb",
+            "MQTT_BROKER": "broker.test.local",
+            "INFLUX_URL": "http://influxdb:8086", "INFLUX_TOKEN": "token123",
+        }
+        with patch.dict(os.environ, overrides):
             cfg = load_daq_config()
-            self.assertTrue(cfg.MOCKUP_MODE)
-            self.assertEqual(cfg.DESTINATION, "mqtt")
-            self.assertEqual(cfg.DB_DSN, "postgresql://test:test@timescaledb:5432/testdb")
-            self.assertEqual(cfg.MQTT_BROKER, "broker.test.local")
-            self.assertEqual(cfg.INFLUX_URL, "http://influxdb:8086")
-            self.assertEqual(cfg.INFLUX_TOKEN, "token123")
-            explicit = load_daq_config(config_path)
-            self.assertEqual(explicit.DESTINATION, base_cfg.DESTINATION)
-            self.assertEqual(explicit.DB_DSN, base_cfg.DB_DSN)
-        finally:
-            for k in ["MOCKUP_MODE", "DESTINATION", "DB_DSN", "MQTT_BROKER", "INFLUX_URL", "INFLUX_TOKEN"]:
-                os.environ.pop(k, None)
+            for name in overrides:
+                self.assertEqual(getattr(cfg, name), getattr(base_cfg, name))
 
 
 if __name__ == "__main__":

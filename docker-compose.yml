@@ -1,3 +1,5 @@
+name: iiot-data-ingest
+
 services:
   timescaledb:
     image: timescale/timescaledb:latest-pg16
@@ -46,64 +48,13 @@ services:
       - influxdb_data:/var/lib/influxdb2
       - influxdb_config:/etc/influxdb2
 
-  # Linux host required: DAQ hardware, device files, and vendor SDK libraries
-  # are mounted from the host into this container.
-  daq-navi:
-    build:
-      context: .
-      dockerfile: services/daq_navi/Dockerfile
-    container_name: daq_navi
-    restart: unless-stopped
-    privileged: true
-    environment:
-      MOCKUP_MODE: ${MOCKUP_MODE:-false}
-      DESTINATION: ${DESTINATION:-postgresql}
-      DB_DSN: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-admin}@timescaledb:5432/${POSTGRES_DB:-daq_db}
-      SPOOL_DIR: /var/lib/daq_navi/spool
-      MQTT_BROKER: mqtt-broker
-      MQTT_PORT: 1883
-      INFLUX_URL: http://influxdb:8086
-      INFLUX_TOKEN: ${INFLUX_TOKEN:-mddp-super-secret-auth-token}
-      INFLUX_ORG: ${INFLUX_ORG:-mddp}
-      INFLUX_BUCKET: ${INFLUX_BUCKET:-daq_telemetry}
-      LD_LIBRARY_PATH: /opt/advantech/libs:/usr/lib
-    ports:
-      - "${DAQ_PORT:-8081}:8081"
-    volumes:
-      - /dev:/dev
-      - /usr/lib:/usr/lib:ro
-      - /opt/advantech:/opt/advantech:ro
-      - /etc/biobdaq:/etc/biobdaq:ro
-      - /var/lib/daq:/var/lib/daq:ro
-      - ./services/daq_navi/config.json:/app/services/daq_navi/config.json
-      - daq_spool:/var/lib/daq_navi/spool
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-      mqtt-broker:
-        condition: service_started
-      influxdb:
-        condition: service_started
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8081/api/health', timeout=3)\""]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-
-  portal:
-    image: nginx:alpine
-    container_name: daq_portal
-    restart: unless-stopped
-    ports:
-      - "${PORTAL_PORT:-8080}:80"
-    volumes:
-      - ./services/portal:/usr/share/nginx/html:ro
-
 volumes:
   tsdb_data:
-  daq_spool:
   mosquitto_data:
   mosquitto_log:
   influxdb_data:
   influxdb_config:
+
+networks:
+  default:
+    name: iiot-data-ingest_default

@@ -1,0 +1,7 @@
+services:
+  daq-navi:
+    volumes:
+      - ../../services/daq_navi:/app/services/daq_navi
+    environment:
+      FLASK_ENV: development
+      FLASK_DEBUG: "1"
