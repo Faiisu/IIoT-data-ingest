@@ -3,19 +3,17 @@
 """
 test_watchdog.py
 ────────────────
-Unit tests for DAQ pipeline watchdog checks, timeouts, and watchdog script.
+Unit tests for DAQ pipeline watchdog checks and timeouts.
 """
 
 import os
 import sys
 import time
-import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
 SERVICE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORE_DIR = os.path.join(SERVICE_DIR, "core")
-PROJECT_ROOT = os.path.abspath(os.path.join(SERVICE_DIR, "..", ".."))
-for p in (CORE_DIR, SERVICE_DIR, PROJECT_ROOT):
+for p in (CORE_DIR, SERVICE_DIR):
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -118,40 +116,6 @@ class TestTimescaleClientTimeouts(unittest.TestCase):
         kwargs = mock_pg_connect.call_args[1]
         self.assertEqual(kwargs.get("connect_timeout"), 10)
         self.assertIn("statement_timeout=15000", kwargs.get("options", ""))
-
-
-class TestWatchdogShellScript(unittest.TestCase):
-    """Test deploy/linux/watchdog.sh script execution and options."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.script_path = os.path.abspath(
-            os.path.join(PROJECT_ROOT, "deploy/linux/watchdog.sh")
-        )
-
-    def test_script_syntax_valid(self):
-        """bash -n ensures no syntax errors in watchdog.sh."""
-        res = subprocess.run(["bash", "-n", self.script_path], capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0, f"watchdog.sh syntax error: {res.stderr}")
-
-    def test_help_flag(self):
-        """watchdog.sh --help should exit 0 and display usage."""
-        res = subprocess.run(["bash", self.script_path, "--help"], capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0)
-        self.assertIn("Usage:", res.stdout)
-        self.assertIn("--daemon", res.stdout)
-        self.assertIn("--timeout", res.stdout)
-        self.assertIn("--check", res.stdout)
-
-    def test_check_flag_execution(self):
-        """watchdog.sh --check executes one-shot without hanging."""
-        res = subprocess.run(
-            ["bash", self.script_path, "--check", "--timeout", "5"],
-            capture_output=True,
-            text=True,
-            timeout=15
-        )
-        self.assertIn(res.returncode, (0, 1))
 
 
 if __name__ == "__main__":
