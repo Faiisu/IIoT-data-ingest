@@ -15,6 +15,7 @@ services:
       DAQ_OPERATOR_USER: "${DAQ_OPERATOR_USER:-admin}"
       DAQ_OPERATOR_HASH: "${DAQ_OPERATOR_HASH:-pbkdf2_sha256:100000:b5fa8a65cb0d3df701a753855dfc87c1:e4586d94fcfb275047e4704b5aa83ea0eb7240b42c65e9959ac2014386f3f684}"
       DAQ_SESSION_KEY: "${DAQ_SESSION_KEY:-insecure_default_session_signing_key_change_in_production}"
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-*}"
     ports:
       - "${DAQ_PORT:-8081}:8081"
     volumes:
