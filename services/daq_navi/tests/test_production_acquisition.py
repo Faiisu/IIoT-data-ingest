@@ -1,23 +1,41 @@
 """Standalone production acquisition contract; all data stays in temporary storage."""
 
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from services.daq_navi.core.production_acquisition import (
-    AcquisitionFault,
-    AdvantechDaq,
-    DurableSpool,
-    ProductionPipeline,
-    InfluxProductionDestination,
-    TimescaleProductionDestination,
-    run_production,
-    validate_production_config,
-)
-from services.daq_navi.core.config_loader import DaqNaviConfig
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+try:
+    from services.daq_navi.core.production_acquisition import (
+        AcquisitionFault,
+        AdvantechDaq,
+        DurableSpool,
+        ProductionPipeline,
+        InfluxProductionDestination,
+        TimescaleProductionDestination,
+        run_production,
+        validate_production_config,
+    )
+    from services.daq_navi.core.config_loader import DaqNaviConfig
+except ModuleNotFoundError:
+    from core.production_acquisition import (
+        AcquisitionFault,
+        AdvantechDaq,
+        DurableSpool,
+        ProductionPipeline,
+        InfluxProductionDestination,
+        TimescaleProductionDestination,
+        run_production,
+        validate_production_config,
+    )
+    from core.config_loader import DaqNaviConfig
 
 
 def configuration(**changes):
@@ -104,6 +122,7 @@ class ProductionAcquisitionTests(unittest.TestCase):
         self.assertIn('unit=kPa,provenance=physical_daq sample_id=', encoded[0])
         self.assertIn('sample_id="run:1000:0"', encoded[0])
         self.assertNotIn('sample_id=', encoded[0].split(' ', 1)[0])
+        self.assertNotIn('calibration_revision', encoded[0])
         self.assertEqual([int(line.rsplit(' ', 1)[1]) for line in encoded[:3]],
                          [1_700_000_000_000_000_000 + i * 1_000_000 for i in range(3)])
         self.assertEqual([int(line.rsplit(' ', 1)[1]) for line in encoded[3:]],
@@ -668,6 +687,51 @@ class TestTimescaleMigration(unittest.TestCase):
         executed = [str(call[0][0]) for call in mock_cur.execute.call_args_list]
         self.assertFalse(any("DROP COLUMN" in s for s in executed))
         self.assertFalse(any("INSERT INTO daq_schema_migrations" in s for s in executed))
+
+
+class TestCalibrationRevisionRetirementVerification(unittest.TestCase):
+    def test_pipeline_rows_omit_calibration_revision(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = configuration()
+            pipeline = ProductionPipeline(cfg, Path(d), FakeDestination())
+            pipeline.capture([1.0, 2.0, 3.0, 4.0], end_time_ns=1_700_000_000_000_000_000)
+            _, rows = pipeline.spool.oldest()
+            self.assertGreater(len(rows), 0)
+            for row in rows:
+                self.assertNotIn("calibration_revision", row)
+            pipeline.close()
+
+    def test_influx_write_payload_omits_calibration_revision(self):
+        cfg = configuration(DESTINATION="influxdb", INFLUX_TOKEN="test-token")
+        posted_data = []
+
+        class MockResponse:
+            status = 204
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+
+        def mock_opener(req, timeout=5):
+            posted_data.append(req.data.decode("utf-8"))
+            return MockResponse()
+
+        sink = InfluxProductionDestination(cfg, opener=mock_opener)
+        rows = [{
+            "time_ns": 1_700_000_000_000_000_000,
+            "sample_id": "test:0:0",
+            "session_id": "sess-1",
+            "device_id": "dev-1",
+            "channel": 0,
+            "sensor_name": "ch0",
+            "raw_voltage": 2.5,
+            "calibrated_value": 50.0,
+            "unit": "kPa",
+            "provenance": "physical_daq",
+        }]
+        sink.write(rows, [])
+        self.assertEqual(len(posted_data), 1)
+        self.assertNotIn("calibration_revision", posted_data[0])
 
 
 if __name__ == "__main__":

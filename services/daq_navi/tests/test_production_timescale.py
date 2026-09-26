@@ -1,20 +1,32 @@
 """Production schema contract against an explicitly isolated TimescaleDB database."""
 
 import os
+import sys
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import psycopg2
 from psycopg2 import sql
 
-from services.daq_navi.core.production_acquisition import (
-    ProductionPipeline,
-    TimescaleProductionDestination,
-)
-from services.daq_navi.tests.test_production_acquisition import configuration
+try:
+    from services.daq_navi.core.production_acquisition import (
+        ProductionPipeline,
+        TimescaleProductionDestination,
+    )
+    from services.daq_navi.tests.test_production_acquisition import configuration
+except ModuleNotFoundError:
+    from core.production_acquisition import (
+        ProductionPipeline,
+        TimescaleProductionDestination,
+    )
+    from tests.test_production_acquisition import configuration
 
 
 class ProductionTimescaleTests(unittest.TestCase):
