@@ -209,6 +209,10 @@ h1 { margin-bottom: 5px; font: 800 clamp(24px, 2.4vw, 31px)/1.18 var(--display);
 .page-message.warning { border-color: #ead8b7; background: #fdf8ef; color: var(--amber); }
 .page-footer { display: flex; justify-content: space-between; gap: 10px; margin-top: 21px; padding: 13px 2px 3px; border-top: 1px solid var(--line); color: #89948e; font: 8px var(--mono); letter-spacing: .05em; }
 .page-footer b { color: #5d7568; font-weight: 500; }
+.page-footer small { color: #929c96; font: inherit; font-size: 7px; letter-spacing: inherit; }
+.page-footer small .github-credit { display: inline-flex; margin-left: 3px; color: #7f8c85; vertical-align: -2px; }
+.page-footer small .github-credit svg { width: 11px; height: 11px; fill: currentColor; }
+.page-footer small .github-credit:hover, .page-footer small .github-credit:focus-visible { color: #146b53; }
 @media (max-width: 1180px) {
   .sidebar { width: 218px; }
   .main-content { margin-left: 218px; padding-inline: 25px; }
