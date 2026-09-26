@@ -25,3 +25,4 @@ venv/
 pgdata/
 .env
 deploy/daq-navi/config.local.json
+deploy/daq-navi/config/

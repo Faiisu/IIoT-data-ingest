@@ -6,12 +6,15 @@ import time
 import hmac
 import hashlib
 import secrets
+import urllib.parse
 from urllib.parse import urlparse
 from typing import Optional, Dict, Any, Tuple
 
 COOKIE_NAME = "daq_session_id"
 DEFAULT_SESSION_TTL_SECONDS = 3600  # 1 hour
 REDACTED_PLACEHOLDER = "********"
+CLEAR_SECRET = "__CLEAR__"
+SECRET_FIELDS = ("DB_PASSWORD", "POSTGRES_PASSWORD", "INFLUX_TOKEN", "MQTT_PASSWORD")
 
 
 def hash_password(password: str, salt: Optional[bytes] = None, iterations: int = 100_000) -> str:
@@ -180,17 +183,20 @@ class SessionStore:
 
 
 def redact_dsn_password(dsn: Optional[str]) -> str:
-    """Mask password embedded inside a DSN connection string."""
+    """Mask password embedded inside a DSN connection string (URL or keyword)."""
     if not dsn:
         return ""
     # Matches :password@ in connection strings like postgresql://user:pass@host:port/db
-    return re.sub(r":([^/@:\s]+)@", f":{REDACTED_PLACEHOLDER}@", dsn)
+    masked = re.sub(r":([^/@:\s]+)@", f":{REDACTED_PLACEHOLDER}@", dsn)
+    # Matches password=... or password='...' in keyword DSNs
+    masked = re.sub(r"(password\s*=\s*)([^\s'\"]+|'[^']*'|\"[^\"]*\")", rf"\g<1>{REDACTED_PLACEHOLDER}", masked, flags=re.IGNORECASE)
+    return masked
 
 
 def redact_config_secrets(config: Dict[str, Any]) -> Dict[str, Any]:
     """Return a deep copy of config with all sensitive secrets masked."""
     result = dict(config)
-    for key in ("POSTGRES_PASSWORD", "INFLUX_TOKEN", "MQTT_PASSWORD"):
+    for key in SECRET_FIELDS:
         if key in result and result[key]:
             result[key] = REDACTED_PLACEHOLDER
 
@@ -200,36 +206,105 @@ def redact_config_secrets(config: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def redact_error_message(message: str, *configs: Dict[str, Any]) -> str:
+    """Sanitize secrets embedded inside exception or error strings."""
+    if not message:
+        return ""
+    cleaned = str(message)
+    secrets_to_hide = {
+        str(config[key])
+        for config in configs if isinstance(config, dict)
+        for key in SECRET_FIELDS if config.get(key)
+    }
+    for secret in sorted(secrets_to_hide, key=len, reverse=True):
+        for form in (secret, urllib.parse.quote(secret, safe="")):
+            cleaned = cleaned.replace(form, REDACTED_PLACEHOLDER)
+    return redact_dsn_password(cleaned)
+
+
+def infer_db_connection_mode(config: Dict[str, Any]) -> str:
+    """
+    Deterministic migration rule for existing configurations without DB_CONNECTION_MODE.
+    If DB_DSN equals the standard DSN derived from DB_HOST, DB_PORT, DB_NAME, DB_USER,
+    and DB_PASSWORD, it is 'fields' mode. Otherwise it is preserved as custom 'dsn' mode.
+    """
+    explicit = config.get("DB_CONNECTION_MODE")
+    if explicit in ("fields", "dsn"):
+        return explicit
+
+    saved_dsn = str(config.get("DB_DSN", "")).strip()
+    if not saved_dsn:
+        return "fields"
+
+    user = urllib.parse.quote(str(config.get("DB_USER", "admin")), safe="")
+    host = str(config.get("DB_HOST", "localhost"))
+    port = str(config.get("DB_PORT", "5432"))
+    dbname = urllib.parse.quote(str(config.get("DB_NAME", "daq_db")), safe="")
+
+    pw_candidates = [
+        str(config.get("DB_PASSWORD", "")),
+        str(config.get("POSTGRES_PASSWORD", "")),
+        "admin"
+    ]
+    for pw in pw_candidates:
+        if not pw:
+            continue
+        p = urllib.parse.quote(pw, safe="")
+        if saved_dsn == f"postgresql://{user}:{p}@{host}:{port}/{dbname}":
+            return "fields"
+
+    return "dsn"
+
+
 def merge_preserved_secrets(new_config: Dict[str, Any], old_config: Dict[str, Any]) -> Dict[str, Any]:
     """
     Merge new configuration with existing saved configuration.
     If a secret is omitted or contains the placeholder, preserve the old value.
     If explicitly replaced with a new value, use the new value.
+    If explicitly marked with CLEAR_SECRET or cleared with CLEAR_<field>, clear it.
     """
     merged = dict(new_config)
-    secret_keys = ["POSTGRES_PASSWORD", "INFLUX_TOKEN", "MQTT_PASSWORD"]
 
-    for key in secret_keys:
+    for key in SECRET_FIELDS:
         val = merged.get(key)
         old_val = old_config.get(key, "")
-        if val is None or val == "" or val == REDACTED_PLACEHOLDER:
-            # Preserve old value
+        if val == CLEAR_SECRET or (val == "" and merged.get(f"CLEAR_{key}") is True):
+            merged[key] = ""
+        elif val is None or val == "" or val == REDACTED_PLACEHOLDER:
+            # Preserve old value if present
             if old_val:
                 merged[key] = old_val
             elif key in merged and val == "":
-                # explicitly cleared
                 pass
+        else:
+            merged[key] = val
+
+    # Synchronize legacy POSTGRES_PASSWORD with DB_PASSWORD if present
+    if "DB_PASSWORD" in merged and "POSTGRES_PASSWORD" not in new_config:
+        merged["POSTGRES_PASSWORD"] = merged["DB_PASSWORD"]
+    elif "POSTGRES_PASSWORD" in merged and "DB_PASSWORD" not in new_config:
+        merged["DB_PASSWORD"] = merged["POSTGRES_PASSWORD"]
 
     # Handle DB_DSN password preservation
     if "DB_DSN" in merged:
         new_dsn = merged["DB_DSN"]
         old_dsn = old_config.get("DB_DSN", "")
-        if REDACTED_PLACEHOLDER in new_dsn and old_dsn:
-            # User submitted masked DSN, restore original password
+        if REDACTED_PLACEHOLDER in new_dsn:
+            # Check for URL DSN password
             old_match = re.search(r":([^/@:\s]+)@", old_dsn)
-            if old_match:
-                old_pass = old_match.group(1)
-                merged["DB_DSN"] = new_dsn.replace(f":{REDACTED_PLACEHOLDER}@", f":{old_pass}@")
+            effective_pw = old_match.group(1) if old_match else old_config.get("DB_PASSWORD", "")
+            if effective_pw:
+                merged["DB_DSN"] = new_dsn.replace(f":{REDACTED_PLACEHOLDER}@", f":{effective_pw}@")
+            # Check for keyword DSN password
+            kw_match = re.search(r"password\s*=\s*([^\s]+)", old_dsn, flags=re.IGNORECASE)
+            kw_pw = kw_match.group(1) if kw_match else old_config.get("DB_PASSWORD", "")
+            if kw_pw:
+                merged["DB_DSN"] = re.sub(
+                    rf"(password\s*=\s*){re.escape(REDACTED_PLACEHOLDER)}",
+                    rf"\g<1>{kw_pw}",
+                    merged["DB_DSN"],
+                    flags=re.IGNORECASE
+                )
 
     return merged
 

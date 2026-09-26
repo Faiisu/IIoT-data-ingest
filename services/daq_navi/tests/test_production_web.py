@@ -111,6 +111,7 @@ class ProductionWebTests(unittest.TestCase):
 
     def test_destination_switch_saves_then_restarts_running_acquisition(self):
         with patch.object(web, 'get_running_process', side_effect=[(123, 'production'), (None, None)]), \
+             patch.object(web, '_test_destination', return_value='ok'), \
              patch.object(web, 'stop_acquisition', return_value={'stopped': True}), \
              patch.object(web, 'drain_spool_for_destination_switch'), \
              patch.object(web, 'start_acquisition', return_value={'started': True}) as start:
@@ -121,6 +122,8 @@ class ProductionWebTests(unittest.TestCase):
 
     def test_same_backend_target_change_drains_but_token_rotation_does_not(self):
         with patch.object(web, 'get_running_process', return_value=(None, None)), \
+             patch.object(web, '_test_destination', return_value='ok'), \
+             patch.object(web, 'effective_timescale_retention', return_value='30 days'), \
              patch.object(web, 'drain_spool_for_destination_switch') as drain:
             response = self.client.post('/api/config', json={'DB_DSN': 'postgresql://other-host/testdb'})
         self.assertEqual(response.status_code, 200, response.get_json())
@@ -192,7 +195,8 @@ class ProductionWebTests(unittest.TestCase):
 
     def test_retention_save_applies_policy_and_reports_failure(self):
         with patch.object(web, 'get_running_process', return_value=(None, None)), \
-             patch.object(web.TimescaleProductionDestination, 'ensure_schema') as apply:
+             patch.object(web.TimescaleProductionDestination, 'ensure_schema') as apply, \
+             patch.object(web, 'effective_timescale_retention', return_value='14 days'):
             response = self.client.post('/api/config', json={'DB_RETENTION_DAYS': 14})
         self.assertEqual(response.status_code, 200, response.get_json())
         apply.assert_called_once()
@@ -207,7 +211,8 @@ class ProductionWebTests(unittest.TestCase):
         del self.config['DB_RETENTION_DAYS']
         self.path.write_text(json.dumps(self.config), encoding='utf-8')
         with patch.object(web, 'get_running_process', return_value=(None, None)), \
-             patch.object(web.TimescaleProductionDestination, 'ensure_schema') as apply:
+             patch.object(web.TimescaleProductionDestination, 'ensure_schema') as apply, \
+             patch.object(web, 'effective_timescale_retention', return_value='30 days'):
             response = self.client.post('/api/config', json={'DB_RETENTION_DAYS': 30})
         self.assertEqual(response.status_code, 200, response.get_json())
         apply.assert_called_once()
@@ -221,7 +226,8 @@ class ProductionWebTests(unittest.TestCase):
         self.config['DB_RETENTION_DAYS'] = 30
         self.path.write_text(json.dumps(self.config), encoding='utf-8')
         with patch.object(web, 'get_running_process', return_value=(None, None)), \
-             patch.object(web.TimescaleProductionDestination, 'ensure_schema') as apply:
+             patch.object(web.TimescaleProductionDestination, 'ensure_schema') as apply, \
+             patch.object(web, 'effective_timescale_retention', return_value='60 days'):
             response = self.client.post('/api/config', json={'DB_RETENTION_DAYS': 60})
         self.assertEqual(response.status_code, 200, response.get_json())
         apply.assert_called_once()
@@ -256,7 +262,7 @@ class ProductionWebTests(unittest.TestCase):
                           side_effect=Exception('TimescaleDB connection refused')):
             response = self.client.post('/api/config', json={'DB_RETENTION_DAYS': 45})
         self.assertEqual(response.status_code, 503)
-        self.assertIn('Could not apply retention policy', response.get_json()['message'])
+        self.assertIn('compensation failed', response.get_json()['message'])
         self.assertEqual(self.client.get('/api/config').get_json()['DB_RETENTION_DAYS'], 30)
 
     def test_get_retention_effective_policy(self):

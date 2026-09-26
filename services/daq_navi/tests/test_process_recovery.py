@@ -12,6 +12,13 @@ web = importlib.import_module('services.daq_navi.web.app')
 
 class ProcessRecoveryTests(unittest.TestCase):
     def test_status_and_start_recover_live_child_when_pid_file_is_stale(self):
+        previous_auth = (web.session_store, web.operator_users)
+        self.addCleanup(setattr, web, 'operator_users', previous_auth[1])
+        self.addCleanup(setattr, web, 'session_store', previous_auth[0])
+        web.configure_auth(
+            users={'recovery_test_operator': web.auth.hash_password('recovery-test-password')},
+            session_key='recovery-test-session-key-at-least-32-bytes'
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'acquisition.pid').write_text('921')
@@ -37,7 +44,10 @@ class ProcessRecoveryTests(unittest.TestCase):
                  patch.object(web, 'read_runtime_status', return_value={
                      'checked_at_ns': time.time_ns(), 'state': 'running'}), \
                  patch.object(web, 'read_recent_gaps', return_value=[]):
-                status = web.app.test_client().get('/api/status').get_json()
+                client = web.app.test_client()
+                _, cookie = web.session_store.create_session('recovery_test_operator')
+                client.set_cookie(web.COOKIE_NAME, cookie)
+                status = client.get('/api/status').get_json()
                 start = web.start_acquisition('production')
 
             self.assertTrue(status['is_running'])

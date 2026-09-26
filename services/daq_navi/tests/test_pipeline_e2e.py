@@ -20,13 +20,24 @@ for p in (CORE_DIR, SERVICE_DIR, PROJECT_ROOT):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from config_loader import load_daq_config
+from config_loader import load_daq_config, DaqNaviConfig
 from buffered_daq_to_timescaledb import Calibrator, DaqSampleParser, TimescaleDBClient
 
 class TestPipelineE2E(unittest.TestCase):
     def setUp(self):
         self.config_path = os.path.join(SERVICE_DIR, "config.json")
-        self.cfg = load_daq_config(self.config_path)
+        base = load_daq_config(self.config_path).raw
+        channels = {}
+        for channel in (0, 1):
+            entry = dict(base['CHANNELS'][str(channel)])
+            entry['scale'] = {
+                'enabled': True, 'low_voltage': 1.0, 'high_voltage': 5.0,
+                'low_value': -100.0, 'high_value': 100.0,
+            }
+            channels[str(channel)] = entry
+        self.cfg = DaqNaviConfig({
+            **base, 'CHANNEL_COUNT': 2, 'CLOCK_RATE': 2000, 'CHANNELS': channels,
+        }, allow_env_overrides=False)
 
     def test_dp101a_calibration(self):
         calibrator = Calibrator(

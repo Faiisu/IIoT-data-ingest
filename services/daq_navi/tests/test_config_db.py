@@ -27,18 +27,15 @@ class TestConfigAndSchema(unittest.TestCase):
         
         self.assertEqual(cfg.DEVICE_ID, "pci1716-0")
         self.assertEqual(cfg.DEVICE_DESCRIPTION, "PCI-1716,BID#0")
-        self.assertEqual(cfg.CHANNEL_COUNT, 2)
-        self.assertEqual(cfg.CLOCK_RATE, 2000)
+        self.assertEqual(cfg.CHANNEL_COUNT, 8)
+        self.assertEqual(cfg.CLOCK_RATE, 1000)
         self.assertEqual(cfg.DB_TABLE, "daq_telemetry")
         self.assertEqual(cfg.DESTINATION, "postgresql")
         self.assertEqual(cfg.DB_RETENTION_DAYS, 30)
         self.assertEqual(cfg.DB_COMPRESSION_INTERVAL, "1 hour")
         
-        # Verify 4 channels are parsed
-        self.assertIn(0, cfg.channels)
-        self.assertIn(1, cfg.channels)
-        self.assertIn(2, cfg.channels)
-        self.assertIn(3, cfg.channels)
+        # Verify all configured channels are parsed, including disabled inputs.
+        self.assertEqual(set(cfg.channels), set(range(8)))
         
         ch0 = cfg.channels[0]
         self.assertEqual(ch0.label, "pressure-ch0")
@@ -46,11 +43,11 @@ class TestConfigAndSchema(unittest.TestCase):
         self.assertTrue(ch0.scale_enabled)
         self.assertEqual(ch0.low_voltage, 1.0)
         self.assertEqual(ch0.high_voltage, 5.0)
-        self.assertEqual(ch0.low_value, -100.0)
-        self.assertEqual(ch0.high_value, 100.0)
+        self.assertEqual(ch0.low_value, 0.0)
+        self.assertEqual(ch0.high_value, 1000.0)
 
     def test_sql_schema_file_exists_and_contains_table(self):
-        sql_path = os.path.join(SERVICE_DIR, "scripts", "sql", "db_setup.sql")
+        sql_path = os.path.join(PROJECT_ROOT, "scripts", "sql", "db_setup.sql")
         self.assertTrue(os.path.exists(sql_path), "db_setup.sql must exist")
         with open(sql_path, "r", encoding="utf-8") as f:
             content = f.read()

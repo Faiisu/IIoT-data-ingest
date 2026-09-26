@@ -107,7 +107,7 @@ class TestDockerComposeStack(unittest.TestCase):
         self.assertTrue(any("/dev" in v for v in volumes), "daq-navi must mount /dev")
         self.assertTrue(any("/usr/lib" in v for v in volumes), "daq-navi must mount /usr/lib")
         self.assertTrue(any("/etc/biobdaq" in v for v in volumes), "daq-navi must mount /etc/biobdaq")
-        self.assertTrue(any("config.json" in v for v in volumes), "daq-navi must bind-mount config.json")
+        self.assertIn("./config:/app/config", volumes, "daq-navi must mount the private config directory for atomic replacement")
         self.assertTrue(data["volumes"]["daq_spool"]["external"])
         self.assertTrue(data["networks"]["infrastructure"]["external"])
 

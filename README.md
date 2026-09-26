@@ -12,11 +12,12 @@ Use a Linux host with Docker Engine and the Docker Compose plugin. Physical DAQ 
 cp .env.example .env
 cp deploy/daq-navi/.env.example deploy/daq-navi/.env
 cp deploy/portal/.env.example deploy/portal/.env
-cp services/daq_navi/config.json deploy/daq-navi/config.local.json
+mkdir -p deploy/daq-navi/config
+cp services/daq_navi/config.json deploy/daq-navi/config/config.json
 # Edit .env for infrastructure credentials, and the two service files for host ports.
 ```
 
-Review the private `deploy/daq-navi/config.local.json` or open the Config Center before collecting data. [The checked-in DAQ JSON](services/daq_navi/config.json) is a starting example; its device, channel, calibration, and destination values are machine-specific. Keep destination credentials in the private config consistent with those in `.env`. The service may begin acquisition when it starts if `AUTO_START_ON_STARTUP` is enabled.
+Review the private `deploy/daq-navi/config/config.json` or open the Config Center before collecting data. [The checked-in DAQ JSON](services/daq_navi/config.json) is a starting example; its device, channel, calibration, and destination values are machine-specific. Keep destination credentials in the private config consistent with those in `.env`. The service may begin acquisition when it starts if `AUTO_START_ON_STARTUP` is enabled.
 
 If the TimescaleDB volume already exists, changing `POSTGRES_PASSWORD` in `.env` alone does not change the password of the existing database user. Update that user in PostgreSQL and the DAQ destination configuration together.
 
@@ -101,7 +102,7 @@ The MUSASHI services have their own configuration and process controls. Their Po
 
 ### DAQ control and configuration
 
-The DAQ web service reads and writes the private `deploy/daq-navi/config.local.json`, mounted at `/app/services/daq_navi/config.json` in the container. Start it from [the checked-in DAQ example](services/daq_navi/config.json). The Config Center exposes the hardware span, sensor channel table, per-channel calibration, destination, startup behavior, and runtime status. The API merges and validates changes before saving. Production start validates the saved configuration again. Saving during acquisition can stop and restart the run after confirmation in the UI.
+The DAQ web service reads and writes the private `deploy/daq-navi/config/config.json`, mounted through `/app/config` in the container so saves use atomic replacement. Start it from [the checked-in DAQ example](services/daq_navi/config.json). The Config Center exposes the hardware span, sensor channel table, per-channel calibration, destination, startup behavior, and runtime status. It shows saved secrets as unchanged placeholders; blank keeps them and an explicit clear action removes optional values. PostgreSQL connection mode is explicit: fields mode follows host/user controls, while custom DSN mode uses the connection string. Saves carry a revision to reject stale browser tabs. A failed destination transition attempts to resume the previous run; a committed config whose run cannot start is reported as saved with acquisition stopped. Timescale retention changes are checked against policy readback and compensated on save failure. Saving during acquisition can stop and restart the run after confirmation in the UI.
 
 `START_CHANNEL` and `CHANNEL_COUNT` select a contiguous hardware input span. `CHANNELS` contains each input's enabled state, label, unit, signal type, voltage range, and linear calibration. For PCI-1716 differential inputs, an even channel starts a pair and reserves the following odd channel. The physical wiring, input mode, and range must agree.
 

@@ -10,6 +10,7 @@ and maps string enums to Advantech BDaq constants.
 import os
 import json
 import logging
+import urllib.parse
 from types import SimpleNamespace
 
 log = logging.getLogger(__name__)
@@ -56,6 +57,39 @@ def _get_bool_env(key: str, default: bool = False) -> bool:
     if val is not None:
         return val.lower() in ("true", "1", "yes")
     return bool(default)
+
+def infer_db_connection_mode(config_dict: dict) -> str:
+    """
+    Deterministic migration rule for configs without explicit DB_CONNECTION_MODE.
+    If DB_DSN matches standard connection fields, mode is 'fields'.
+    Otherwise, if a custom DSN is present, mode is 'dsn'.
+    """
+    explicit = config_dict.get("DB_CONNECTION_MODE")
+    if explicit in ("fields", "dsn"):
+        return explicit
+
+    saved_dsn = str(config_dict.get("DB_DSN", "")).strip()
+    if not saved_dsn:
+        return "fields"
+
+    user = urllib.parse.quote(str(config_dict.get("DB_USER", "admin")), safe="")
+    host = str(config_dict.get("DB_HOST", "localhost"))
+    port = str(config_dict.get("DB_PORT", "5432"))
+    dbname = urllib.parse.quote(str(config_dict.get("DB_NAME", "daq_db")), safe="")
+
+    pw_candidates = [
+        str(config_dict.get("DB_PASSWORD", "")),
+        str(config_dict.get("POSTGRES_PASSWORD", "")),
+        "admin"
+    ]
+    for pw in pw_candidates:
+        if not pw:
+            continue
+        p = urllib.parse.quote(pw, safe="")
+        if saved_dsn == f"postgresql://{user}:{p}@{host}:{port}/{dbname}":
+            return "fields"
+
+    return "dsn"
 
 class ChannelConfig:
     def __init__(self, channel_id: int, raw_dict: dict):
@@ -117,6 +151,7 @@ class DaqNaviConfig:
         self.DESTINATION = env("DESTINATION", config_dict.get("DESTINATION", "postgresql")).lower()
         
         # Database
+        self.DB_CONNECTION_MODE = env("DB_CONNECTION_MODE", config_dict.get("DB_CONNECTION_MODE") or infer_db_connection_mode(config_dict))
         self.DB_HOST = env("DB_HOST", config_dict.get("DB_HOST", "localhost"))
         self.DB_PORT = str(env("DB_PORT", config_dict.get("DB_PORT", "5432")))
         self.DB_NAME = env("DB_NAME", config_dict.get("DB_NAME", "daq_db"))
@@ -161,14 +196,22 @@ class DaqNaviConfig:
 
 def load_daq_config(config_path: str = None) -> DaqNaviConfig:
     if config_path is None:
-        p1 = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
-        p2 = os.path.join(os.path.dirname(__file__), "config.json")
-        if os.path.exists(p1):
-            config_path = p1
-        elif os.path.exists(p2):
-            config_path = p2
+        env_path = os.getenv("DAQ_CONFIG_PATH", "").strip()
+        if env_path and os.path.exists(env_path):
+            config_path = env_path
+        elif os.path.exists("/app/config/config.json"):
+            config_path = "/app/config/config.json"
+        elif os.path.exists("/etc/daq-navi/config.json"):
+            config_path = "/etc/daq-navi/config.json"
         else:
-            config_path = p1
+            p1 = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+            p2 = os.path.join(os.path.dirname(__file__), "config.json")
+            if os.path.exists(p1):
+                config_path = p1
+            elif os.path.exists(p2):
+                config_path = p2
+            else:
+                config_path = p1
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Config file not found: {config_path}")
     with open(config_path, "r", encoding="utf-8") as f:

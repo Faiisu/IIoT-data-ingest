@@ -12,10 +12,11 @@ Linux is the only supported deployment host for these Compose projects. The DAQ 
 cp .env.example .env
 cp deploy/daq-navi/.env.example deploy/daq-navi/.env
 cp deploy/portal/.env.example deploy/portal/.env
-cp services/daq_navi/config.json deploy/daq-navi/config.local.json
+mkdir -p deploy/daq-navi/config
+cp services/daq_navi/config.json deploy/daq-navi/config/config.json
 ```
 
-Edit the root `.env` for TimescaleDB, Mosquitto, and InfluxDB; replace all demo credentials and tokens. The two files under `deploy/` set DAQ and Portal host ports independently. Portal links and polling ports live in `services/portal/config.json`; update its `daq` entry when changing `DAQ_PORT`. Review the private `deploy/daq-navi/config.local.json` for the device, channel span, signal types, input ranges, calibration, and destination. Its saved `DB_DSN` must match the database credentials in the root `.env` and use host `timescaledb` for this Docker network. For InfluxDB, use host `influxdb` on this Docker network, with the organization, bucket, and token from the infrastructure installation. The checked-in values may not match the installed hardware. The private DAQ config is ignored by Git and is mounted into the DAQ container as `/app/services/daq_navi/config.json`.
+Edit the root `.env` for TimescaleDB, Mosquitto, and InfluxDB; replace all demo credentials and tokens. The two files under `deploy/` set DAQ and Portal host ports independently. Portal links and polling ports live in `services/portal/config.json`; update its `daq` entry when changing `DAQ_PORT`. Review the private `deploy/daq-navi/config/config.json` for the device, channel span, signal types, input ranges, calibration, and destination. Its saved `DB_DSN` must match the database credentials in the root `.env` and use host `timescaledb` for this Docker network. For InfluxDB, use host `influxdb` on this Docker network, with the organization, bucket, and token from the infrastructure installation. The checked-in values may not match the installed hardware. The private DAQ config directory is ignored by Git and mounted at `/app/config`; atomic saves replace `config.json` inside that directory.
 
 ## Start and operate
 
@@ -48,6 +49,20 @@ docker compose -f docker-compose.yml ps
 ```
 
 Stopping DAQ or Portal this way does not stop the infrastructure project. The DAQ spool is an external volume in its Compose file, so DAQ project removal does not delete it. Avoid `down -v` on the infrastructure project when preserving database volumes.
+
+### Migrate an existing private DAQ config mount
+
+The DAQ project now bind mounts `deploy/daq-navi/config/` as a directory. On an existing installation, stop acquisition through Config Center and check pending batches. Preserve the current file and the external spool volume. Copy the old file into the new directory, keep it private, and compare the copy before recreating the container:
+
+```bash
+mkdir -p deploy/daq-navi/config
+cp -a deploy/daq-navi/config.local.json deploy/daq-navi/config/config.json
+chmod 600 deploy/daq-navi/config/config.json
+cmp deploy/daq-navi/config.local.json deploy/daq-navi/config/config.json
+docker volume inspect iiot-data-ingest_daq_spool
+```
+
+If the new container fails its health check, stop that container, change the Compose mount and `DAQ_CONFIG_PATH` back to the previous file mount, then recreate the previous image. Retain both config copies until acquisition, destination, operator authentication, and API readback have been checked. Rollback never deletes or recreates the spool volume.
 
 ### Cutover from the former combined stack
 

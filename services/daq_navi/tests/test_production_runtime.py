@@ -70,7 +70,7 @@ class ProductionRuntimeTests(unittest.TestCase):
             self.assertFalse(any("mockup_stream_to_db" in call for call in invocations))
 
     def test_compose_persists_standalone_buffer(self):
-        compose_file = ROOT / "docker-compose.yml"
+        compose_file = ROOT / "deploy" / "daq-navi" / "compose.yml"
         if not compose_file.exists():
             self.skipTest("docker-compose.yml not present in container runtime")
         try:
@@ -78,6 +78,7 @@ class ProductionRuntimeTests(unittest.TestCase):
             config = yaml.safe_load(compose_file.read_text())
             mounts = config["services"]["daq-navi"]["volumes"]
             self.assertIn("daq_spool:/var/lib/daq_navi/spool", mounts)
+            self.assertIn("./config:/app/config", mounts)
             self.assertIn("daq_spool", config["volumes"])
         except ImportError:
             text = compose_file.read_text()

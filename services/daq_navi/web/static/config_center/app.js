@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const fields = ['DEVICE_DESCRIPTION', 'DEVICE_ID', 'PROFILE_PATH', 'START_CHANNEL', 'CHANNEL_COUNT', 'CLOCK_RATE', 'SECTION_LENGTH', 'SECTION_COUNT', 'DESTINATION', 'DB_PRODUCTION_TABLE', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_DSN', 'DB_RETENTION_DAYS', 'SPOOL_MAX_BYTES', 'DB_MOCKUP_TABLE', 'INFLUX_URL', 'INFLUX_ORG', 'INFLUX_BUCKET', 'INFLUX_TOKEN', 'INFLUX_MEASUREMENT', 'MQTT_BROKER', 'MQTT_PORT', 'MQTT_TOPIC', 'MQTT_QOS', 'MQTT_USERNAME', 'MQTT_PASSWORD', 'MQTT_CA_CERTS', 'MQTT_CLIENT_CERT', 'MQTT_CLIENT_KEY', 'AUTO_START_MODE'];
+const fields = ['DEVICE_DESCRIPTION', 'DEVICE_ID', 'PROFILE_PATH', 'START_CHANNEL', 'CHANNEL_COUNT', 'CLOCK_RATE', 'SECTION_LENGTH', 'SECTION_COUNT', 'DESTINATION', 'DB_PRODUCTION_TABLE', 'DB_CONNECTION_MODE', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_DSN', 'DB_RETENTION_DAYS', 'SPOOL_MAX_BYTES', 'DB_MOCKUP_TABLE', 'INFLUX_URL', 'INFLUX_ORG', 'INFLUX_BUCKET', 'INFLUX_TOKEN', 'INFLUX_MEASUREMENT', 'MQTT_BROKER', 'MQTT_PORT', 'MQTT_TOPIC', 'MQTT_QOS', 'MQTT_USERNAME', 'MQTT_PASSWORD', 'MQTT_CA_CERTS', 'MQTT_CLIENT_CERT', 'MQTT_CLIENT_KEY', 'AUTO_START_MODE'];
 const scaleIds = ['scale-low-voltage', 'scale-high-voltage', 'scale-low-value', 'scale-high-value'];
 let config = {};
 let channels = {};
@@ -70,13 +70,24 @@ async function loadConfig() {
   if (!response.ok) throw new Error(`DAQ config API returned HTTP ${response.status}`);
   config = await response.json();
   channels = structuredClone(config.CHANNELS || {});
+  const secretIds = ['DB_PASSWORD', 'INFLUX_TOKEN', 'MQTT_PASSWORD'];
   fields.forEach((id) => {
-    if ($(id) && config[id] !== undefined) $(id).value = config[id];
+    const el = $(id);
+    if (!el) return;
+    if (secretIds.includes(id)) {
+      const hasSecret = Boolean(config[id] && config[id] !== '');
+      el.value = '';
+      el.dataset.hasSaved = hasSecret ? 'true' : 'false';
+      el.placeholder = hasSecret ? 'Saved secret unchanged (leave blank to keep)' : (id === 'MQTT_PASSWORD' ? 'Optional broker password' : 'Enter secret');
+    } else if (config[id] !== undefined) {
+      el.value = config[id];
+    }
   });
   $('AUTO_START_ON_STARTUP').checked = config.AUTO_START_ON_STARTUP === true;
   $('MQTT_TLS_ENABLED').checked = config.MQTT_TLS_ENABLED === true;
-  manualDsn = Boolean(config.DB_DSN && config.DB_DSN !== postgresDsn());
-  $('DB_CONNECTION_MODE').value = manualDsn ? 'dsn' : 'fields';
+  const explicitMode = config.DB_CONNECTION_MODE || (config.DB_DSN && config.DB_DSN !== postgresDsn() ? 'dsn' : 'fields');
+  manualDsn = (explicitMode === 'dsn');
+  $('DB_CONNECTION_MODE').value = explicitMode;
   selectedChannel = Number.isInteger(Number(config.START_CHANNEL)) ? Number(config.START_CHANNEL) : 0;
   renderChannels();
   renderChannelEditor();
@@ -271,12 +282,26 @@ function collectConfig() {
     }
   }
   const payload = {};
+  const secretIds = ['DB_PASSWORD', 'INFLUX_TOKEN', 'MQTT_PASSWORD'];
   fields.forEach((id) => {
     const el = $(id);
     if (!el) return;
+    if (secretIds.includes(id)) {
+      if (el.value.trim() !== '') {
+        payload[id] = el.value.trim();
+      } else if (el.dataset.hasSaved === 'true') {
+        payload[id] = '********';
+      } else {
+        payload[id] = '';
+      }
+      return;
+    }
     const integerFields = ['START_CHANNEL', 'CHANNEL_COUNT', 'CLOCK_RATE', 'SECTION_LENGTH', 'SECTION_COUNT', 'DB_PORT', 'DB_RETENTION_DAYS', 'SPOOL_MAX_BYTES', 'MQTT_PORT', 'MQTT_QOS'];
     payload[id] = integerFields.includes(id) ? Number(el.value) : el.value.trim();
   });
+  if (payload.DB_CONNECTION_MODE === 'fields') {
+    delete payload.DB_DSN;
+  }
   payload.AUTO_START_ON_STARTUP = $('AUTO_START_ON_STARTUP').checked;
   payload.MQTT_TLS_ENABLED = $('MQTT_TLS_ENABLED').checked;
   payload.CHANNELS = channels;
@@ -338,6 +363,7 @@ function validateConfig(payload) {
 
 async function saveConfig() {
   const payload = collectConfig();
+  payload._REV = config._REV;
   const errors = validateConfig(payload);
   if (errors.length) {
     validationVisible = true;
@@ -370,7 +396,11 @@ async function saveConfig() {
       channels = structuredClone(config.CHANNELS || channels);
       setDirty(false);
       updateSummary();
-    } else setDirty(true);
+    } else {
+      setDirty(true);
+      // Keep the operator's edits after a failed or stale save. Runtime status
+      // is refreshed below; reloading the form is an explicit operator action.
+    }
     validationVisible = true;
     setMessage('');
     showConfigErrors([{section: sectionForSaveError(error.message), message: error.message}], true);
@@ -383,10 +413,25 @@ async function testDestination() {
   pullChannelEditor();
   const resultBox = $('destination-result');
   const payload = {};
-  ['DESTINATION', 'DB_DSN', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'INFLUX_URL', 'INFLUX_ORG', 'INFLUX_BUCKET', 'INFLUX_TOKEN', 'MQTT_BROKER', 'MQTT_PORT', 'MQTT_USERNAME', 'MQTT_PASSWORD', 'MQTT_TLS_ENABLED', 'MQTT_CA_CERTS', 'MQTT_CLIENT_CERT', 'MQTT_CLIENT_KEY'].forEach((id) => {
+  const secretIds = ['DB_PASSWORD', 'INFLUX_TOKEN', 'MQTT_PASSWORD'];
+  ['DESTINATION', 'DB_CONNECTION_MODE', 'DB_DSN', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'INFLUX_URL', 'INFLUX_ORG', 'INFLUX_BUCKET', 'INFLUX_TOKEN', 'MQTT_BROKER', 'MQTT_PORT', 'MQTT_USERNAME', 'MQTT_PASSWORD', 'MQTT_TLS_ENABLED', 'MQTT_CA_CERTS', 'MQTT_CLIENT_CERT', 'MQTT_CLIENT_KEY'].forEach((id) => {
     const input = $(id);
-    if (input) payload[id] = input.type === 'checkbox' ? input.checked : input.value.trim();
+    if (!input) return;
+    if (secretIds.includes(id)) {
+      if (input.value.trim() !== '') {
+        payload[id] = input.value.trim();
+      } else if (input.dataset.hasSaved === 'true') {
+        payload[id] = '********';
+      } else {
+        payload[id] = '';
+      }
+    } else {
+      payload[id] = input.type === 'checkbox' ? input.checked : input.value.trim();
+    }
   });
+  if (payload.DB_CONNECTION_MODE === 'fields') {
+    delete payload.DB_DSN;
+  }
   resultBox.textContent = 'Testing connection…';
   resultBox.className = 'inline-result';
   $('test-destination').disabled = true;

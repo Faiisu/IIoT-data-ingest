@@ -13,9 +13,27 @@ else
 fi
 
 # The saved file is authoritative after initial setup.
+CONFIG_FILE="${DAQ_CONFIG_PATH:-}"
+if [ -z "$CONFIG_FILE" ]; then
+    if [ -f "/app/config/config.json" ]; then
+        CONFIG_FILE="/app/config/config.json"
+    elif [ -f "config.json" ]; then
+        CONFIG_FILE="config.json"
+    fi
+fi
+
+if [ -n "$CONFIG_FILE" ] && [ ! -f "$CONFIG_FILE" ]; then
+    CONFIG_DIR=$(dirname "$CONFIG_FILE")
+    mkdir -p "$CONFIG_DIR"
+    if [ -f "config.json" ]; then
+        cp "config.json" "$CONFIG_FILE"
+        chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+    fi
+fi
+
 MOCKUP="false"
-if [ -f "config.json" ]; then
-    MOCKUP=$($PY -c "import json; print(json.load(open('config.json')).get('MOCKUP_MODE', False))" 2>/dev/null || echo "false")
+if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
+    MOCKUP=$($PY -c "import json; print(json.load(open('$CONFIG_FILE')).get('MOCKUP_MODE', False))" 2>/dev/null || echo "false")
 fi
 
 # Pass through custom command if invoked with python, bash, sh, etc.

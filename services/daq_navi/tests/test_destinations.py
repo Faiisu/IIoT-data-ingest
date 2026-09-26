@@ -43,6 +43,21 @@ class TestDestinations(unittest.TestCase):
     def setUp(self):
         self.config_path = os.path.join(SERVICE_DIR, "config.json")
         self.cfg = load_daq_config(self.config_path)
+        while not mockup_stream_to_db.data_queue.empty():
+            try:
+                mockup_stream_to_db.data_queue.get_nowait()
+            except Exception:
+                break
+        mockup_stream_to_db.stop_event.clear()
+        self.addCleanup(self._clear_mockup_queue)
+
+    def _clear_mockup_queue(self):
+        mockup_stream_to_db.stop_event.set()
+        while not mockup_stream_to_db.data_queue.empty():
+            try:
+                mockup_stream_to_db.data_queue.get_nowait()
+            except Exception:
+                break
 
     def test_destination_selection_factory(self):
         # Test postgresql
@@ -204,9 +219,9 @@ class TestDestinations(unittest.TestCase):
         )
 
         start_ns = 1_770_000_000_000_000_000
-        raw_data = [3.0, 5.0]  # 1 sample, 2 channels
-        rows = parser.parse_batch(start_ns, raw_data, 2)
-        self.assertEqual(len(rows), 2)
+        raw_data = [3.0] * self.cfg.CHANNEL_COUNT  # one interleaved frame for every configured input
+        rows = parser.parse_batch(start_ns, raw_data, len(raw_data))
+        self.assertEqual(len(rows), self.cfg.CHANNEL_COUNT)
         self.assertEqual(rows[0][1], "pci1716-0")
 
         # Test passing rows to MQTTClient formatting
@@ -234,18 +249,19 @@ class TestDestinations(unittest.TestCase):
         mock_factory.return_value = mock_client
 
         # Put a test batch into mockup queue
-        test_batch = (time.time_ns(), [3.0, 3.0, 3.0, 3.0], 4)
+        test_batch = (time.time_ns(), [3.0] * self.cfg.CHANNEL_COUNT, self.cfg.CHANNEL_COUNT)
         mockup_stream_to_db.data_queue.put(test_batch)
 
         # Run writer thread for 1 batch
-        mockup_stream_to_db.stop_event.clear()
-        writer_t = threading.Thread(target=mockup_stream_to_db.db_writer_thread)
-        writer_t.start()
+        with patch.object(mockup_stream_to_db, 'config', self.cfg):
+            mockup_stream_to_db.stop_event.clear()
+            writer_t = threading.Thread(target=mockup_stream_to_db.db_writer_thread)
+            writer_t.start()
 
-        # Allow time to process
-        time.sleep(0.3)
-        mockup_stream_to_db.stop_event.set()
-        writer_t.join(timeout=2.0)
+            # Allow time to process
+            time.sleep(0.3)
+            mockup_stream_to_db.stop_event.set()
+            writer_t.join(timeout=2.0)
 
         # Verify client was called with send_samples
         self.assertTrue(mock_client.send_samples.called)
@@ -259,16 +275,17 @@ class TestDestinations(unittest.TestCase):
         mock_client.connect.return_value = True
         mock_factory.return_value = mock_client
 
-        test_batch = (time.time_ns(), [2.5, 2.5, 2.5, 2.5], 4)
+        test_batch = (time.time_ns(), [2.5] * self.cfg.CHANNEL_COUNT, self.cfg.CHANNEL_COUNT)
         mockup_stream_to_db.data_queue.put(test_batch)
 
-        mockup_stream_to_db.stop_event.clear()
-        writer_t = threading.Thread(target=mockup_stream_to_db.db_writer_thread)
-        writer_t.start()
+        with patch.object(mockup_stream_to_db, 'config', self.cfg):
+            mockup_stream_to_db.stop_event.clear()
+            writer_t = threading.Thread(target=mockup_stream_to_db.db_writer_thread)
+            writer_t.start()
 
-        time.sleep(0.3)
-        mockup_stream_to_db.stop_event.set()
-        writer_t.join(timeout=2.0)
+            time.sleep(0.3)
+            mockup_stream_to_db.stop_event.set()
+            writer_t.join(timeout=2.0)
 
         self.assertTrue(mock_client.send_samples.called)
         sent_rows = mock_client.send_samples.call_args[0][0]

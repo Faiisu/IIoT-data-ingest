@@ -174,7 +174,8 @@ def destination_identity(cfg):
                       values.get("dbname", ""), values.get("service", "")]
             if not any(target):
                 raise ValueError("DB_DSN must identify a PostgreSQL host or service")
-        identity = ["postgresql", *target, cfg.DB_PRODUCTION_TABLE]
+        mode = getattr(cfg, "DB_CONNECTION_MODE", "fields")
+        identity = ["postgresql", mode, *target, cfg.DB_PRODUCTION_TABLE]
     return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
 
 
