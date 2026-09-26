@@ -13,6 +13,8 @@ web = importlib.import_module('services.daq_navi.web.app')
 class DestinationConnectionTests(unittest.TestCase):
     def setUp(self):
         self.client = web.app.test_client()
+        cookie = web.create_test_session('operator')
+        self.client.set_cookie(web.COOKIE_NAME, cookie)
         self.saved = {
             'DESTINATION': 'postgresql',
             'DB_DSN': 'postgresql://saved.example/test',

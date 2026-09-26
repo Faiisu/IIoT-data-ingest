@@ -15,10 +15,13 @@ import sys
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, '..', '..'))
 for path in (BASE_DIR, PROJECT_ROOT):
-    if path not in sys.path:
+    if os.path.exists(path) and path not in sys.path:
         sys.path.insert(0, path)
 
-from services.daq_navi.web.app import app, socketio, init_application
+try:
+    from services.daq_navi.web.app import app, socketio, init_application
+except ModuleNotFoundError:
+    from web.app import app, socketio, init_application
 
 __all__ = ["app", "socketio", "init_application"]
 

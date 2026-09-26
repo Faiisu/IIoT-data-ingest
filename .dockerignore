@@ -1,0 +1,5 @@
+.env
+**/.env
+deploy/daq-navi/config.local.json
+.git
+.scratch

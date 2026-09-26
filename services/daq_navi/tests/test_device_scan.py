@@ -20,6 +20,8 @@ ENUM_OUTPUT = """+---------+---------------+-------------------------------+
 class DeviceScanTests(unittest.TestCase):
     def setUp(self):
         self.client = web.app.test_client()
+        cookie = web.create_test_session('operator')
+        self.client.set_cookie(web.COOKIE_NAME, cookie)
 
     @patch('serial.tools.list_ports.comports', return_value=[])
     @patch.object(web.subprocess, 'run')

@@ -49,13 +49,13 @@ class ProductionTimescaleTests(unittest.TestCase):
                     self.assertEqual(cur.fetchone(), (4, 1.0, 80.0))
                     cur.execute(sql.SQL("""SELECT sample_id, session_id, device_id, channel,
                         sensor_name, raw_voltage, calibrated_value, unit,
-                        calibration_revision, provenance FROM {} WHERE channel=0""").format(
+                        provenance FROM {} WHERE channel=0""").format(
                         sql.Identifier(self.table)))
                     sample = cur.fetchone()
                     self.assertEqual(sample[0], f"{pipeline.session_id}:0:0")
                     self.assertEqual(str(sample[1]), pipeline.session_id)
                     self.assertEqual(sample[2:], ("test-device", 0, "sensor-0", 1.0,
-                                                  20.0, "kPa", "r1", "physical_daq"))
+                                                  20.0, "kPa", "physical_daq"))
                     cur.execute("SELECT config->>'drop_after' FROM timescaledb_information.jobs WHERE hypertable_name=%s AND proc_name='policy_retention'", (self.table,))
                     self.assertEqual(cur.fetchone()[0], "30 days")
             self.cfg.DB_RETENTION_DAYS = 45

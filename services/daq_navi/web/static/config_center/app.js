@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const fields = ['DEVICE_DESCRIPTION', 'DEVICE_ID', 'PROFILE_PATH', 'START_CHANNEL', 'CHANNEL_COUNT', 'CLOCK_RATE', 'SECTION_LENGTH', 'SECTION_COUNT', 'DESTINATION', 'DB_PRODUCTION_TABLE', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_DSN', 'DB_RETENTION_DAYS', 'SPOOL_MAX_BYTES', 'DB_MOCKUP_TABLE', 'INFLUX_URL', 'INFLUX_ORG', 'INFLUX_BUCKET', 'INFLUX_TOKEN', 'INFLUX_MEASUREMENT', 'MQTT_BROKER', 'MQTT_PORT', 'MQTT_TOPIC', 'MQTT_QOS', 'MQTT_USERNAME', 'MQTT_PASSWORD', 'MQTT_CA_CERTS', 'MQTT_CLIENT_CERT', 'MQTT_CLIENT_KEY', 'AUTO_START_MODE'];
-const scaleIds = ['scale-low-voltage', 'scale-high-voltage', 'scale-low-value', 'scale-high-value', 'scale-revision'];
+const scaleIds = ['scale-low-voltage', 'scale-high-voltage', 'scale-low-value', 'scale-high-value'];
 let config = {};
 let channels = {};
 let selectedChannel = 0;
@@ -12,7 +12,7 @@ let validationVisible = false;
 let pendingSamples = [];
 const pendingWindowMs = 60000;
 
-const defaultChannel = () => ({enabled: false, label: '', unit: '', signal_type: 'SingleEnded', value_range: 'V_0To5', scale: {enabled: false, low_voltage: 0, high_voltage: 5, low_value: 0, high_value: 100, revision: ''}});
+const defaultChannel = () => ({enabled: false, label: '', unit: '', signal_type: 'SingleEnded', value_range: 'V_0To5', scale: {enabled: false, low_voltage: 0, high_voltage: 5, low_value: 0, high_value: 100}});
 
 function api(path, options = {}) {
   return fetch(path, {cache: 'no-store', ...options, headers: {'Accept': 'application/json', ...(options.headers || {})}});
@@ -174,7 +174,6 @@ function renderChannelEditor() {
   $('scale-high-voltage').value = scale.high_voltage ?? '';
   $('scale-low-value').value = scale.low_value ?? '';
   $('scale-high-value').value = scale.high_value ?? '';
-  $('scale-revision').value = scale.revision || '';
   updateCalibrationStatus();
   updateWiringGuide();
   updateSignalHint();
@@ -206,7 +205,6 @@ function pullChannelEditor() {
     high_voltage: optionalNumber('scale-high-voltage'),
     low_value: optionalNumber('scale-low-value'),
     high_value: optionalNumber('scale-high-value'),
-    revision: value('scale-revision'),
   };
   channels[String(selectedChannel)] = channel;
   updateSignalHint();
@@ -248,7 +246,7 @@ function updateSummary() {
   $('summary-rate').textContent = `${value('CLOCK_RATE') || '—'} Hz`;
   $('info-mode').textContent = titleCase(config.AUTO_START_MODE || 'production');
   $('info-destination').textContent = titleCase(config.DESTINATION || 'PostgreSQL');
-  $('info-retention').textContent = `${config.DB_RETENTION_DAYS ?? '—'} days`;
+  $('info-retention').textContent = config.DESTINATION === 'influxdb' ? 'Managed by InfluxDB bucket' : `${config.DB_RETENTION_DAYS ?? '—'} days`;
 }
 function titleCase(input) { return String(input).replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()); }
 function postgresDsn() {
@@ -294,7 +292,7 @@ function validateConfig(payload) {
   if (!Number.isInteger(payload.SECTION_LENGTH) || payload.SECTION_LENGTH < 1) add('device', 'Section length must be a positive whole number.');
   if (!Number.isInteger(payload.SECTION_COUNT) || payload.SECTION_COUNT < 0) add('device', 'Section count must be zero or a positive whole number.');
   if (!Number.isInteger(payload.CLOCK_RATE) || payload.CLOCK_RATE < 1000 || payload.CLOCK_RATE > 2000) add('device', 'Sample rate must be between 1000 and 2000 Hz per channel.');
-  if (!Number.isInteger(payload.DB_RETENTION_DAYS) || payload.DB_RETENTION_DAYS < 1) add('destination', 'Retention must be at least one day.');
+  if (payload.DESTINATION !== 'influxdb' && (!Number.isInteger(payload.DB_RETENTION_DAYS) || payload.DB_RETENTION_DAYS < 1)) add('destination', 'Retention must be at least one day.');
   Object.entries(payload.CHANNELS).forEach(([index, channel]) => {
     for (const key of ['low_voltage', 'high_voltage', 'low_value', 'high_value']) {
       if (!Number.isFinite(channel.scale?.[key])) add('channels', `AI${index} calibration ${key.replaceAll('_', ' ')} must be a number.`);
@@ -318,14 +316,18 @@ function validateConfig(payload) {
     if (payload.AUTO_START_MODE === 'production') {
       if (!channel.label || !channel.unit) add('channels', `AI${index} needs a sensor label and engineering unit for production.`);
       if (!scale.enabled) add('channels', `Enable calibration for AI${index} before production acquisition.`);
-      if (!scale.revision?.trim()) add('channels', `AI${index} needs a calibration revision.`);
       if (scale.high_voltage === scale.low_voltage) add('channels', `AI${index} calibration input endpoints must differ.`);
     }
   });
   if (payload.AUTO_START_MODE === 'production') {
     if (!payload.DEVICE_ID) add('device', 'Device ID is required.');
     if (!Number.isInteger(payload.SPOOL_MAX_BYTES) || payload.SPOOL_MAX_BYTES < 1) add('destination', 'Spool capacity must be a positive whole number.');
-    if (payload.DESTINATION !== 'postgresql') add('destination', 'Production acquisition requires PostgreSQL / TimescaleDB.');
+    if (!['postgresql', 'influxdb'].includes(payload.DESTINATION)) add('destination', 'Production destination must be PostgreSQL / TimescaleDB or InfluxDB.');
+    if (payload.DESTINATION === 'influxdb') {
+      try { const url = new URL(payload.INFLUX_URL); if (!['http:', 'https:'].includes(url.protocol)) throw new Error(); }
+      catch (_) { add('destination', 'Enter a valid HTTP(S) InfluxDB URL.'); }
+      if (!payload.INFLUX_ORG || !payload.INFLUX_BUCKET || !payload.INFLUX_TOKEN) add('destination', 'InfluxDB organization, bucket, and token are required.');
+    }
     if (Number.isInteger(payload.SECTION_COUNT) && payload.SECTION_COUNT > 0) add('device', 'Production acquisition requires section count 0 (continuous).');
     if (!active.length) add('channels', 'Enable at least one sensor channel.');
     if (!/^[a-z][a-z0-9_]*$/.test(payload.DB_PRODUCTION_TABLE)) add('destination', 'Production table must use lowercase letters, numbers, and underscores, starting with a letter.');
@@ -635,6 +637,7 @@ function markChanged() {
 function updateDestinationFields() {
   const destination = value('DESTINATION');
   document.querySelectorAll('.postgres-only').forEach((element) => element.classList.toggle('hidden', destination !== 'postgresql'));
+  document.querySelectorAll('.influx-only').forEach((element) => element.classList.toggle('hidden', destination !== 'influxdb'));
   $('influx-fields').classList.toggle('hidden', destination !== 'influxdb');
   $('mqtt-fields').classList.toggle('hidden', destination !== 'mqtt');
   document.querySelectorAll('.postgres-fields').forEach((element) => element.classList.toggle('hidden', destination !== 'postgresql' || manualDsn));

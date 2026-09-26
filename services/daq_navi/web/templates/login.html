@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#004280">
+  <title>DAQ Operator Login</title>
+  <link rel="icon" href="/static/config_center/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/config_center/style.css">
+  <style>
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: #0b1320;
+      color: #e2e8f0;
+      font-family: 'DM Sans', sans-serif;
+      margin: 0;
+    }
+    .login-card {
+      background: #151f30;
+      border: 1px solid #2d3e5a;
+      border-radius: 8px;
+      padding: 32px;
+      width: 100%;
+      max-width: 400px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+    }
+    .brand-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .brand-mark svg {
+      width: 36px;
+      height: 36px;
+      stroke: #38bdf8;
+      stroke-width: 2;
+    }
+    .brand-copy strong {
+      display: block;
+      font-size: 1.25rem;
+      letter-spacing: 0.05em;
+      color: #f8fafc;
+    }
+    .brand-copy small {
+      display: block;
+      font-size: 0.75rem;
+      color: #94a3b8;
+      letter-spacing: 0.1em;
+    }
+    .login-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 20px;
+      color: #cbd5e1;
+    }
+    .form-group {
+      margin-bottom: 16px;
+    }
+    .form-group label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 500;
+      margin-bottom: 6px;
+      color: #94a3b8;
+    }
+    .form-group input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px 12px;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      color: #f8fafc;
+      font-size: 0.95rem;
+      font-family: inherit;
+    }
+    .form-group input:focus {
+      outline: none;
+      border-color: #38bdf8;
+    }
+    .error-banner {
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid #ef4444;
+      color: #fca5a5;
+      padding: 10px 12px;
+      border-radius: 4px;
+      font-size: 0.85rem;
+      margin-bottom: 16px;
+    }
+    .login-btn {
+      width: 100%;
+      padding: 10px 16px;
+      background: #0284c7;
+      color: #ffffff;
+      border: none;
+      border-radius: 4px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s ease;
+      margin-top: 8px;
+    }
+    .login-btn:hover {
+      background: #0369a1;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="brand-header">
+      <div class="brand-mark">
+        <svg viewBox="0 0 32 32" fill="none"><path d="M16 3 4 9.5v13L16 29l12-6.5v-13L16 3Z"/><path d="m4.5 9.7 11.5 6.5 11.5-6.5M16 16.5V29M10 6.3l12 6.6"/></svg>
+      </div>
+      <div class="brand-copy">
+        <strong>MDDP</strong>
+        <small>DAQ OPERATOR ACCESS</small>
+      </div>
+    </div>
+
+    <div class="login-title">Sign in to DAQ Config Center</div>
+
+    {% if error %}
+    <div class="error-banner">{{ error }}</div>
+    {% endif %}
+
+    <form method="POST" action="/login{% if next_url %}?next={{ next_url }}{% endif %}">
+      <div class="form-group">
+        <label for="username">Operator Username</label>
+        <input type="text" id="username" name="username" required autocomplete="username" autofocus>
+      </div>
+
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required autocomplete="current-password">
+      </div>
+
+      <button type="submit" class="login-btn">Sign In</button>
+    </form>
+  </div>
+</body>
+</html>

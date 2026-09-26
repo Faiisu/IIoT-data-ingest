@@ -83,7 +83,7 @@ def compare_replayed_rows(expected_rows, stored_rows):
     max_time_error_ns = 0
     value_mismatches = 0
     unexpected_rows = 0
-    for sample_id, recorded_at, voltage, scaled, unit, revision, channel in stored_rows:
+    for sample_id, recorded_at, voltage, scaled, unit, channel in stored_rows:
         row = expected.get(sample_id)
         if row is None:
             unexpected_rows += 1
@@ -91,9 +91,9 @@ def compare_replayed_rows(expected_rows, stored_rows):
         remaining.discard(sample_id)
         max_time_error_ns = max(max_time_error_ns,
                                 abs(datetime_ns(recorded_at) - row["time_ns"]))
-        if ((voltage, scaled, unit, revision, channel) !=
+        if ((voltage, scaled, unit, channel) !=
                 (row["raw_voltage"], row["calibrated_value"], row["unit"],
-                 row["calibration_revision"], row["channel"])):
+                 row["channel"])):
             value_mismatches += 1
     return {
         "missing_sample_ids": len(remaining),
@@ -187,7 +187,7 @@ def main():
                     cur.execute(sql.SQL("SELECT count(*) FROM {} WHERE session_id=%s").format(sql.Identifier(table)), (next(iter(first_sessions)),))
                     first_session_rows = cur.fetchone()[0]
                     cur.execute(sql.SQL("""SELECT sample_id,time,raw_voltage,
-                        calibrated_value,unit,calibration_revision,channel FROM {}
+                        calibrated_value,unit,channel FROM {}
                         WHERE session_id=%s""").format(sql.Identifier(table)),
                         (next(iter(first_sessions)),))
                     replay_comparison = compare_replayed_rows(first_rows, cur.fetchall())

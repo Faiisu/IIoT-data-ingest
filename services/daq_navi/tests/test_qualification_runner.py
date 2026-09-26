@@ -12,6 +12,8 @@ from pathlib import Path
 SERVICE = Path(__file__).resolve().parents[1]
 RUNNER = SERVICE / "tests" / "qualify_standalone.py"
 OUTAGE_RUNNER = SERVICE / "tests" / "qualify_outage_replay.py"
+if str(SERVICE / "tests") not in sys.path:
+    sys.path.insert(0, str(SERVICE / "tests"))
 
 
 class QualificationRunnerTests(unittest.TestCase):
@@ -25,15 +27,14 @@ class QualificationRunnerTests(unittest.TestCase):
             "raw_voltage": 1.0,
             "calibrated_value": 20.0,
             "unit": "kPa",
-            "calibration_revision": "r1",
             "channel": 0,
         }]
-        stored = [("session:0:0", at, 1.0, 20.0, "kPa", "r1", 0)]
+        stored = [("session:0:0", at, 1.0, 20.0, "kPa", 0)]
         result = compare_replayed_rows(expected, stored)
         self.assertEqual(result["missing_sample_ids"], 0)
         self.assertEqual(result["value_mismatches"], 0)
         self.assertEqual(result["maximum_timestamp_rounding_ns"], 123)
-        altered = [("session:0:0", at, 2.0, 20.0, "kPa", "r1", 0)]
+        altered = [("session:0:0", at, 2.0, 20.0, "kPa", 0)]
         self.assertEqual(compare_replayed_rows(expected, altered)["value_mismatches"], 1)
 
     def test_physical_assessment_rejects_missing_sample_window(self):

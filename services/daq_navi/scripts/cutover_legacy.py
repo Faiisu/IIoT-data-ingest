@@ -38,7 +38,7 @@ def cutover(connection, legacy_table, production_table):
                 raise ValueError(f'Unexpected legacy relation kind: {row[0]}')
             cursor.execute(sql.SQL('''CREATE OR REPLACE VIEW {} AS SELECT
                 time,sample_id,session_id,device_id,channel,sensor_name,
-                raw_voltage,calibrated_value,unit,calibration_revision,provenance
+                raw_voltage,calibrated_value,unit,provenance
                 FROM {} WHERE provenance='physical_daq' ''').format(
                     sql.Identifier(legacy_table), sql.Identifier(production_table)))
             cursor.execute(sql.SQL('SELECT COUNT(*) FROM {}').format(sql.Identifier(legacy_table)))

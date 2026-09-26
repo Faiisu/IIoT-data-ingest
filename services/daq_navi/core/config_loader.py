@@ -78,7 +78,6 @@ class ChannelConfig:
         self.high_voltage = float(scale_dict.get("high_voltage", 5.0))
         self.low_value = float(scale_dict.get("low_value", 0.0))
         self.high_value = float(scale_dict.get("high_value", 100.0))
-        self.calibration_revision = str(scale_dict.get("revision", "")).strip()
         self.has_scale = "scale" in raw_dict
 
 class DaqNaviConfig:

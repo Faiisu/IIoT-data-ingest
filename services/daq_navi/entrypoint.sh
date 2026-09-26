@@ -18,6 +18,13 @@ if [ -f "config.json" ]; then
     MOCKUP=$($PY -c "import json; print(json.load(open('config.json')).get('MOCKUP_MODE', False))" 2>/dev/null || echo "false")
 fi
 
+# Pass through custom command if invoked with python, bash, sh, etc.
+if [ "$#" -gt 0 ] && [ "$1" != "app.py" ]; then
+    if [ "$1" = "python" ] || [ "$1" = "python3" ] || [ "$1" = "bash" ] || [ "$1" = "sh" ] || [ "$1" = "/bin/bash" ] || [ "$1" = "/bin/sh" ]; then
+        exec "$@"
+    fi
+fi
+
 # Web GUI mode vs Headless Daemon mode
 # When ENABLE_WEB_UI is true (default), launches app.py which binds port 8081 and manages streaming
 if [ "${ENABLE_WEB_UI:-true}" = "true" ] && [ "${HEADLESS:-false}" != "true" ]; then

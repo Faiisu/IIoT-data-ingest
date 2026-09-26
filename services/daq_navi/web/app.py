@@ -19,34 +19,110 @@ import signal
 import tempfile
 import math
 import uuid
+from datetime import datetime
+import csv
+import io
+import urllib.parse
+import urllib.request
 from pathlib import Path
-from flask import Flask, render_template, jsonify, request, redirect, url_for
+from flask import Flask, render_template, jsonify, request, redirect, url_for, has_request_context
 from flask_socketio import SocketIO, emit
 
+from . import auth
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-if PROJECT_ROOT not in sys.path:
+WEB_DIR = os.path.dirname(os.path.abspath(__file__))
+SERVICE_DIR = os.path.dirname(WEB_DIR)
+for p in (SERVICE_DIR, WEB_DIR):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+PROJECT_ROOT = os.path.abspath(os.path.join(SERVICE_DIR, '..', '..'))
+if os.path.exists(PROJECT_ROOT) and PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from daq_navi.core.config_loader import DaqNaviConfig
-from daq_navi.core.production_acquisition import (
-    AcquisitionFault, DurableSpool, TimescaleProductionDestination,
-    validate_production_config,
-)
+try:
+    from daq_navi.core.config_loader import DaqNaviConfig
+    from daq_navi.core.production_acquisition import (
+        AcquisitionFault, DurableSpool, TimescaleProductionDestination, InfluxProductionDestination,
+        validate_production_config, destination_identity,
+    )
+except ModuleNotFoundError:
+    from core.config_loader import DaqNaviConfig
+    from core.production_acquisition import (
+        AcquisitionFault, DurableSpool, TimescaleProductionDestination, InfluxProductionDestination,
+        validate_production_config, destination_identity,
+    )
+
+COOKIE_NAME = auth.COOKIE_NAME
+session_store = None
+operator_users = {}
+
+PORTAL_ORIGIN = os.getenv("PORTAL_ORIGIN", "http://localhost:8080").strip()
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:8081,http://127.0.0.1:8081").split(",") if o.strip()]
+if PORTAL_ORIGIN and PORTAL_ORIGIN not in ALLOWED_ORIGINS:
+    ALLOWED_ORIGINS.append(PORTAL_ORIGIN)
+
+def configure_auth(users=None, session_key=None, ttl_seconds=auth.DEFAULT_SESSION_TTL_SECONDS):
+    global session_store, operator_users
+    if users is None or session_key is None:
+        users, session_key = auth.load_auth_secrets()
+    session_store = auth.SessionStore(session_key, ttl_seconds=ttl_seconds)
+    operator_users = users
+
+def get_current_session():
+    if session_store is None:
+        return None
+    cookie_val = request.cookies.get(COOKIE_NAME)
+    return session_store.validate_cookie(cookie_val)
+
+def create_test_session(username="operator"):
+    if session_store is None:
+        configure_auth(users={username: auth.hash_password("test-pass")}, session_key="test-key-32-bytes-long-secret-key")
+    _, cookie_val = session_store.create_session(username)
+    return cookie_val
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 @app.before_request
-def handle_preflight():
+def handle_preflight_and_auth():
     if request.method == "OPTIONS":
         return ('', 204)
 
+    # 1. CSRF / Origin check for mutating state changes
+    if request.method in ('POST', 'PUT', 'DELETE'):
+        origin = request.headers.get('Origin')
+        if origin and not auth.is_allowed_origin(origin, ALLOWED_ORIGINS):
+            return jsonify({'error': 'Forbidden: Invalid Origin'}), 403
+
+    # 2. Public endpoints and static assets
+    public_paths = {'/login', '/logout', '/api/health', '/favicon.ico'}
+    if request.path in public_paths or request.path.startswith('/static/'):
+        return None
+
+    # 3. Enforce session authentication if session store is active
+    if session_store is not None:
+        session = get_current_session()
+        if not session:
+            if request.path.startswith('/api/'):
+                return jsonify({'error': 'Unauthorized'}), 401
+            next_url = request.full_path if request.query_string else request.path
+            return redirect(url_for('login', next=next_url))
+
 @app.after_request
 def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    origin = request.headers.get('Origin')
+    if request.path == '/api/health':
+        if origin and auth.is_allowed_origin(origin, ALLOWED_ORIGINS):
+            response.headers['Access-Control-Allow-Origin'] = origin
+            response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        elif not origin:
+            response.headers['Access-Control-Allow-Origin'] = '*'
+    elif origin and auth.is_allowed_origin(origin, ALLOWED_ORIGINS):
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     return response
 
 @app.route('/', defaults={'path': ''}, methods=['OPTIONS'])
@@ -409,6 +485,62 @@ def scan_host_usb_devices():
 
     return unique_detected, warnings
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'GET':
+        if get_current_session() is not None:
+            next_url = request.args.get('next', '/')
+            if not next_url.startswith('/'):
+                next_url = '/'
+            return redirect(next_url)
+        return render_template('login.html', next_url=request.args.get('next', ''))
+
+    # POST login
+    next_url = request.args.get('next') or request.form.get('next') or '/'
+    if not next_url.startswith('/'):
+        next_url = '/'
+
+    data = request.get_json(silent=True) if request.is_json else request.form
+    username = (data.get('username') or '').strip()
+    password = data.get('password') or ''
+
+    stored_hash = operator_users.get(username) if operator_users else None
+    if not stored_hash or not auth.verify_password(password, stored_hash):
+        if request.is_json:
+            return jsonify({'error': 'Invalid username or password'}), 401
+        return render_template('login.html', error='Invalid username or password', next_url=next_url), 401
+
+    if session_store is None:
+        return jsonify({'error': 'Authentication service not initialized'}), 500
+
+    _, cookie_val = session_store.create_session(username)
+    if request.is_json:
+        resp = jsonify({'status': 'ok', 'redirect': next_url})
+    else:
+        resp = redirect(next_url)
+
+    is_secure = request.is_secure or request.headers.get('X-Forwarded-Proto') == 'https'
+    resp.set_cookie(
+        COOKIE_NAME,
+        cookie_val,
+        httponly=True,
+        samesite='Lax',
+        secure=is_secure,
+        path='/'
+    )
+    return resp
+
+
+@app.route('/logout', methods=['GET', 'POST'])
+def logout():
+    cookie_val = request.cookies.get(COOKIE_NAME)
+    if session_store and cookie_val:
+        session_store.invalidate_session(cookie_val)
+    resp = redirect(url_for('login'))
+    resp.delete_cookie(COOKIE_NAME, path='/')
+    return resp
+
+
 @app.route('/')
 def home():
     return render_template('index.html')
@@ -419,24 +551,118 @@ def favicon():
 
 @app.route('/api/config', methods=['GET'])
 def get_config():
-    return jsonify(read_config())
+    return jsonify(auth.redact_config_secrets(read_config()))
+
+
+def drain_spool_for_destination_switch(old_config, new_config):
+    """While stopped, finish all old-backend writes before recording a new owner."""
+    old_cfg = DaqNaviConfig(old_config, allow_env_overrides=False)
+    new_cfg = DaqNaviConfig(new_config, allow_env_overrides=False)
+    if destination_identity(old_cfg) == destination_identity(new_cfg):
+        return
+    cfg = old_cfg
+    spool = DurableSpool(Path(cfg.SPOOL_DIR), cfg.SPOOL_MAX_BYTES)
+    try:
+        open_gap = spool.conn.execute('SELECT 1 FROM gaps WHERE end_ns IS NULL LIMIT 1').fetchone()
+        has_records = bool(spool.pending_batches or spool.pending_gaps() or open_gap)
+        stored_destination = spool.state_value('destination') or ('postgresql' if has_records else None)
+        old_destination = 'influxdb' if cfg.DESTINATION == 'influxdb' else 'postgresql'
+        stored_identity = spool.state_value('destination_identity')
+        old_identity = destination_identity(cfg)
+        if has_records and stored_destination and stored_destination != old_destination:
+            raise AcquisitionFault(f"spool belongs to {stored_destination}, not the saved {old_destination} destination")
+        if has_records and stored_identity and stored_identity != old_identity:
+            raise AcquisitionFault('spool target identity does not match saved destination settings; refusing to redirect pending records')
+        if has_records and not stored_identity and old_destination != 'postgresql':
+            raise AcquisitionFault('legacy spool target is unknown; only PostgreSQL legacy ownership can be drained safely')
+        spool.close_open_gaps_for_switch(time.time_ns())
+        sink = InfluxProductionDestination(cfg) if cfg.DESTINATION == 'influxdb' else TimescaleProductionDestination(cfg)
+        while spool.pending_batches or spool.pending_gaps():
+            batches = spool.oldest_many(1)
+            gaps = spool.pending_gaps()
+            rows = [row for _, batch in batches for row in batch]
+            sink.write(rows, gaps)
+            spool.acknowledge_many([batch_id for batch_id, _ in batches])
+            spool.acknowledge_gaps([gap['gap_id'] for gap in gaps])
+        if spool.pending_batches or spool.pending_gaps():
+            raise AcquisitionFault('Old destination still has pending spool records; destination was not switched.')
+    finally:
+        spool.close()
 
 @app.route('/api/config', methods=['POST'])
 def save_config():
     try:
         current = read_config()
-        payload = request.get_json(silent=True)
+        payload = request.get_json(silent=True) or {}
+        payload = auth.merge_preserved_secrets(payload, current)
         updated = merge_config(current, payload)
     except (ValueError, TypeError, KeyError) as exc:
         return jsonify({'status': 'error', 'message': str(exc)}), 400
+    if current.get('SPOOL_DIR', '/var/lib/daq_navi/spool') != updated.get('SPOOL_DIR', '/var/lib/daq_navi/spool'):
+        return jsonify({'status': 'error', 'message': 'SPOOL_DIR changes are unsupported; pending records and gap history must remain in the existing spool.'}), 400
     previous_retention = current.get('DB_RETENTION_DAYS')
-    if 'DB_RETENTION_DAYS' in updated and updated['DB_RETENTION_DAYS'] != previous_retention:
+    pid, mode = get_running_process()
+    was_running = pid is not None
+    switch_stop_result = None
+    supported_sinks = {'postgresql', 'timescaledb', 'influxdb'}
+    needs_identity = (
+        current.get('AUTO_START_MODE', 'production') == 'production' or
+        updated.get('AUTO_START_MODE', 'production') == 'production'
+    ) and current.get('DESTINATION', 'postgresql') in supported_sinks and updated.get('DESTINATION', 'postgresql') in supported_sinks
+    current_identity = updated_identity = None
+    destination_changed = False
+    if needs_identity:
         try:
-            TimescaleProductionDestination(DaqNaviConfig(updated, allow_env_overrides=False)).ensure_schema()
+            current_identity = destination_identity(DaqNaviConfig(current, allow_env_overrides=False))
+            updated_identity = destination_identity(DaqNaviConfig(updated, allow_env_overrides=False))
+        except (ValueError, TypeError) as exc:
+            return jsonify({'status': 'error', 'message': str(exc)}), 400
+        destination_changed = current_identity != updated_identity
+    if destination_changed:
+        if pid is not None:
+            switch_stop_result = stop_acquisition(manual=False)
+            if not switch_stop_result['stopped']:
+                return jsonify({'status': 'error', 'message': 'Could not stop acquisition before switching destination.'}), 503
+        try:
+            drain_spool_for_destination_switch(current, updated)
         except Exception as exc:
-            return jsonify({'status': 'error', 'message': f'Could not apply retention policy: {exc}'}), 503
+            return jsonify({'status': 'error', 'message': f'Could not drain the old destination spool: {exc}'}), 503
+    if 'DB_RETENTION_DAYS' in updated and updated['DB_RETENTION_DAYS'] != previous_retention:
+        if updated.get('DESTINATION', 'postgresql') != 'influxdb':
+            try:
+                TimescaleProductionDestination(DaqNaviConfig(updated, allow_env_overrides=False)).ensure_schema()
+            except Exception as exc:
+                return jsonify({'status': 'error', 'message': f'Could not apply retention policy: {exc}'}), 503
+    if destination_changed:
+        spool_cfg = DaqNaviConfig(updated, allow_env_overrides=False)
+        spool = DurableSpool(Path(spool_cfg.SPOOL_DIR), spool_cfg.SPOOL_MAX_BYTES)
+        try:
+            spool.set_state('destination', updated.get('DESTINATION', 'postgresql'))
+            if updated_identity:
+                spool.set_state('destination_identity', updated_identity)
+        finally:
+            spool.close()
     if not write_config(updated):
+        if destination_changed:
+            restore = DurableSpool(Path(DaqNaviConfig(updated, allow_env_overrides=False).SPOOL_DIR),
+                                   DaqNaviConfig(updated, allow_env_overrides=False).SPOOL_MAX_BYTES)
+            try:
+                restore.set_state('destination', current.get('DESTINATION', 'postgresql'))
+                if current_identity:
+                    restore.set_state('destination_identity', current_identity)
+            finally:
+                restore.close()
         return jsonify({'status': 'error', 'message': 'Failed to save configuration.'}), 500
+    if was_running and switch_stop_result:
+        target_mode = updated.get('AUTO_START_MODE') if ('AUTO_START_MODE' in (payload or {})) else (mode or updated.get('AUTO_START_MODE', 'production'))
+        start_result = start_acquisition(target_mode)
+        if not start_result['started']:
+            return jsonify({'status': 'error', 'message': 'Saved; restart failed', 'config': updated, **start_result}), 503
+        return jsonify({'status': 'success', 'config': updated,
+                        'retention': 'managed by InfluxDB bucket' if updated.get('DESTINATION') == 'influxdb' else 'TimescaleDB policy',
+                        'previous_session': {'stopped': True, 'drained': True,
+                                             'pending_replay': False, 'pending_batches': 0},
+                        'drained': True, 'pending_replay': False, 'pending_batches': 0})
     pid, mode = get_running_process()
     if pid is not None:
         stop_result = stop_acquisition(manual=False)
@@ -480,6 +706,9 @@ def save_config():
 @app.route('/api/retention', methods=['GET'])
 def get_retention():
     config = read_config()
+    if config.get('DESTINATION', 'postgresql') == 'influxdb':
+        return jsonify({'destination': 'influxdb', 'retention': 'managed by InfluxDB bucket',
+                        'saved_days': None, 'message': 'Configure retention in the InfluxDB bucket settings.'})
     try:
         import psycopg2
         with psycopg2.connect(config['DB_DSN'], connect_timeout=3) as conn:
@@ -622,9 +851,9 @@ def test_destination():
         message = _test_destination(settings)
         return jsonify({'success': True, 'message': message})
     except (ValueError, TypeError) as exc:
-        return jsonify({'success': False, 'message': str(exc)}), 400
+        return jsonify({'success': False, 'message': auth.redact_dsn_password(str(exc))}), 400
     except Exception as exc:
-        return jsonify({'success': False, 'message': f'Connection failed: {exc}'}), 502
+        return jsonify({'success': False, 'message': auth.redact_dsn_password(f'Connection failed: {exc}')}), 502
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
@@ -665,7 +894,8 @@ def get_status():
         'last_sample_ns': runtime.get('last_sample_ns'),
         'writer_error': writer_error,
         'gaps': read_recent_gaps(config),
-        'retention_days': config.get('DB_RETENTION_DAYS', 30),
+        'retention_days': (config.get('DB_RETENTION_DAYS', 30) if dest != 'influxdb' else None),
+        'retention': ('managed by InfluxDB bucket' if dest == 'influxdb' else 'TimescaleDB policy'),
     }
     return jsonify(status)
 
@@ -694,7 +924,16 @@ def read_recent_gaps(config):
 @app.route('/api/health', methods=['GET'])
 def get_health():
     status = get_status().get_json()
-    return jsonify(status), 200 if status['healthy'] else 503
+    if get_current_session() is not None:
+        return jsonify(status), 200 if status.get('healthy') else 503
+    minimal = {
+        'status': status.get('status', 'unknown'),
+        'healthy': status.get('healthy', False),
+        'service': 'daq_navi'
+    }
+    if 'fault' in status and status['fault']:
+        minimal['fault'] = status['fault']
+    return jsonify(minimal), 200 if status.get('healthy') else 503
 
 
 @app.route('/api/samples', methods=['GET'])
@@ -706,6 +945,52 @@ def get_samples():
     except ValueError as exc:
         return jsonify({'message': str(exc)}), 400
     config = read_config()
+    if config.get('DESTINATION') == 'influxdb':
+        try:
+            def flux_quote(value):
+                value = str(value)
+                if '\n' in value or '\r' in value:
+                    raise ValueError('InfluxDB query values cannot contain newline characters')
+                return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+            org = config.get('INFLUX_ORG', '')
+            bucket = flux_quote(config.get('INFLUX_BUCKET', ''))
+            measurement = flux_quote(config.get('INFLUX_MEASUREMENT', 'daq_telemetry'))
+            device = flux_quote(config.get('DEVICE_ID', ''))
+            flux = (f'from(bucket: {bucket}) |> range(start: -2m) '
+                    f'|> filter(fn: (r) => r._measurement == {measurement} and r.device_id == {device} and r.channel == "{channel}" and r.provenance == "physical_daq")'
+                    ' |> filter(fn: (r) => r._field == "raw_voltage" or r._field == "calibrated_value") '
+                    '|> aggregateWindow(every: 1s, fn: mean, createEmpty: false, timeSrc: "_start") '
+                    '|> pivot(rowKey: ["_time", "device_id", "channel", "session_id", "unit"], columnKey: ["_field"], valueColumn: "_value")')
+            query = urllib.request.Request(
+                f"{str(config['INFLUX_URL']).rstrip('/')}/api/v2/query?{urllib.parse.urlencode({'org': org})}",
+                data=flux.encode(), method='POST', headers={
+                    'Authorization': f"Token {config['INFLUX_TOKEN']}",
+                    'Content-Type': 'application/vnd.flux', 'Accept': 'application/csv'})
+            with urllib.request.urlopen(query, timeout=5) as response:
+                records = list(csv.reader(io.StringIO(response.read().decode('utf-8-sig'))))
+            header = None
+            points = []
+            for record in records:
+                if not record or record[0].startswith('#'):
+                    continue
+                if '_time' in record and 'result' in record:
+                    header = record
+                    continue
+                if header is None or len(record) < len(header):
+                    continue
+                row = dict(zip(header, record))
+                if not row.get('_time'):
+                    continue
+                instant = datetime.fromisoformat(row['_time'].replace('Z', '+00:00')).replace(microsecond=0).isoformat()
+                points.append({'time': instant,
+                               'raw_voltage': float(row['raw_voltage']) if row.get('raw_voltage') else None,
+                               'calibrated_value': float(row['calibrated_value']) if row.get('calibrated_value') else None,
+                               'unit': row.get('unit', ''),
+                               'session_id': row.get('session_id', '')})
+        except Exception as exc:
+            return jsonify({'message': f'Production samples unavailable: {exc}'}), 503
+        return jsonify({'channel': channel, 'points': points, 'gaps': read_recent_gaps(config)})
     from psycopg2 import sql
     table = config.get('DB_PRODUCTION_TABLE', 'daq_production_samples')
     try:
@@ -713,14 +998,13 @@ def get_samples():
         with psycopg2.connect(config['DB_DSN'], connect_timeout=3) as conn:
             with conn.cursor() as cursor:
                 cursor.execute(sql.SQL('''SELECT time_bucket('1 second', time),
-                    avg(raw_voltage), avg(calibrated_value), unit, calibration_revision
+                    avg(raw_voltage), avg(calibrated_value), unit
                     FROM {} WHERE channel=%s AND time > now() - INTERVAL '2 minutes'
                     AND provenance='physical_daq'
-                    GROUP BY 1,4,5 ORDER BY 1''').format(sql.Identifier(table)), (channel,))
+                    GROUP BY 1,4 ORDER BY 1''').format(sql.Identifier(table)), (channel,))
                 points = [{'time': row[0].isoformat() if hasattr(row[0], 'isoformat') else str(row[0]),
                            'raw_voltage': row[1],
-                           'calibrated_value': row[2], 'unit': row[3],
-                           'calibration_revision': row[4]} for row in cursor.fetchall()]
+                           'calibrated_value': row[2], 'unit': row[3]} for row in cursor.fetchall()]
     except Exception as exc:
         return jsonify({'message': f'Production samples unavailable: {exc}'}), 503
     return jsonify({'channel': channel, 'points': points,
@@ -741,6 +1025,15 @@ def api_scan_usb():
 @socketio.on('connect')
 def handle_connect():
     """Fires when browser client opens or refreshes the page."""
+    if has_request_context():
+        origin = request.headers.get('Origin')
+        if origin and not auth.is_allowed_origin(origin, ALLOWED_ORIGINS):
+            return False
+        if session_store is not None:
+            cookie_val = request.cookies.get(COOKIE_NAME)
+            if not session_store.validate_cookie(cookie_val):
+                return False
+
     pid, mode = get_running_process()
     is_active = pid is not None
     config = read_config()
@@ -769,9 +1062,16 @@ def handle_connect():
 
 @socketio.on('start_daq')
 def handle_start(data):
+    if has_request_context() and session_store is not None:
+        cookie_val = request.cookies.get(COOKIE_NAME)
+        if not session_store.validate_cookie(cookie_val):
+            if hasattr(request, 'namespace'):
+                emit('control_result', {'started': False, 'message': 'Unauthorized'})
+            return
     req_mode = (data or {}).get('mode')
     result = start_acquisition(req_mode)
-    emit('control_result', result)
+    if hasattr(request, 'namespace'):
+        emit('control_result', result)
 
 
 def start_acquisition(mode=None):
@@ -822,7 +1122,15 @@ def api_start():
 
 @socketio.on('stop_daq')
 def handle_stop():
-    emit('control_result', stop_acquisition(manual=True))
+    if has_request_context() and session_store is not None:
+        cookie_val = request.cookies.get(COOKIE_NAME)
+        if not session_store.validate_cookie(cookie_val):
+            if hasattr(request, 'namespace'):
+                emit('control_result', {'stopped': False, 'message': 'Unauthorized'})
+            return
+    res = stop_acquisition(manual=True)
+    if hasattr(request, 'namespace'):
+        emit('control_result', res)
 
 
 def stop_acquisition(manual=True):
@@ -931,7 +1239,14 @@ def api_clear_buffer():
     return jsonify({'job_id': job_id, 'state': 'starting'}), 202
 
 def init_application():
-    """Initial recovery check on Web GUI startup."""
+    """Initial recovery check and fail-closed auth secret validation on Web GUI startup."""
+    try:
+        users, session_key = auth.load_auth_secrets()
+        configure_auth(users=users, session_key=session_key)
+    except Exception as exc:
+        print(f"[FATAL] Authentication setup failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
     pid, mode = get_running_process()
     if pid is not None:
         print(f"[SYSTEM] Detected active background process running (PID: {pid}). Re-attaching...")

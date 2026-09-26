@@ -12,6 +12,7 @@ from services.daq_navi.core.production_acquisition import (
     AdvantechDaq,
     DurableSpool,
     ProductionPipeline,
+    InfluxProductionDestination,
     run_production,
     validate_production_config,
 )
@@ -85,6 +86,94 @@ class FakeDestination:
 
 
 class ProductionAcquisitionTests(unittest.TestCase):
+    def test_influx_line_protocol_uses_ns_identity_and_field_sample_id(self):
+        cfg = configuration(DESTINATION='influxdb', INFLUX_TOKEN='test')
+        rows = []
+        for rate in (1000, 2000):
+            step = 1_000_000_000 // rate
+            for index in range(3):
+                rows.append({"time_ns": 1_700_000_000_000_000_000 + index * step,
+                             "sample_id": f"run:{rate}:{index}", "device_id": "device,1",
+                             "channel": 2, "session_id": "session 1", "sensor_name": "sensor x",
+                             "raw_voltage": 1.25, "calibrated_value": 25.0, "unit": "kPa",
+                             "provenance": "physical_daq"})
+        encoded = InfluxProductionDestination.points(rows, [], cfg.INFLUX_MEASUREMENT).splitlines()
+        self.assertEqual(len(encoded), 6)
+        self.assertIn('device_id=device\\,1,channel=2,session_id=session\\ 1', encoded[0])
+        self.assertIn('unit=kPa,provenance=physical_daq sample_id=', encoded[0])
+        self.assertIn('sample_id="run:1000:0"', encoded[0])
+        self.assertNotIn('sample_id=', encoded[0].split(' ', 1)[0])
+        self.assertEqual([int(line.rsplit(' ', 1)[1]) for line in encoded[:3]],
+                         [1_700_000_000_000_000_000 + i * 1_000_000 for i in range(3)])
+        self.assertEqual([int(line.rsplit(' ', 1)[1]) for line in encoded[3:]],
+                         [1_700_000_000_000_000_000 + i * 500_000 for i in range(3)])
+
+    def test_influx_production_config_requires_token_and_accepts_valid_settings(self):
+        valid = configuration(DESTINATION='influxdb', INFLUX_TOKEN='scoped-token')
+        self.assertEqual(validate_production_config(valid), (0, 1, 2, 3))
+        invalid = configuration(DESTINATION='influxdb', INFLUX_TOKEN='')
+        with self.assertRaisesRegex(ValueError, 'organization, bucket, and token'):
+            validate_production_config(invalid)
+        unsafe = configuration(DESTINATION='influxdb', INFLUX_TOKEN='token', DEVICE_ID='bad\ndevice')
+        with self.assertRaisesRegex(ValueError, 'DEVICE_ID cannot contain newline'):
+            validate_production_config(unsafe)
+        for setting, unsafe_value in (('unit', 'kP\na'), ('label', 'press\rure')):
+            raw = {**configuration(DESTINATION='influxdb', INFLUX_TOKEN='token').raw}
+            raw['CHANNELS'] = {key: dict(value) for key, value in raw['CHANNELS'].items()}
+            raw['CHANNELS']['0'] = dict(raw['CHANNELS']['0'])
+            raw['CHANNELS']['0'][setting] = unsafe_value
+            with self.assertRaisesRegex(ValueError, 'InfluxDB tag values'):
+                validate_production_config(DaqNaviConfig(raw, allow_env_overrides=False))
+
+    def test_influx_write_failure_keeps_spool_batch_pending_for_replay(self):
+        cfg = configuration(DESTINATION='influxdb', INFLUX_TOKEN='test')
+        with tempfile.TemporaryDirectory() as directory:
+            def fail(*args, **kwargs):
+                raise TimeoutError('ambiguous response')
+            destination = InfluxProductionDestination(cfg, opener=fail)
+            pipeline = ProductionPipeline(cfg, Path(directory), destination, session_id='test-session')
+            pipeline.capture([1, 2, 3, 4], end_time_ns=1_700_000_000_000_000_000)
+            with self.assertRaises(TimeoutError):
+                pipeline.flush_once()
+            self.assertEqual(pipeline.pending_batches, 1)
+            pipeline.close()
+
+    def test_startup_rejects_pending_spool_owned_by_another_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spool = DurableSpool(Path(directory), 1024 * 1024)
+            spool.set_state('destination', 'postgresql')
+            spool.append('old-batch', [{'sample_id': 'old'}])
+            spool.close()
+            cfg = configuration(DESTINATION='influxdb', INFLUX_TOKEN='test', SPOOL_DIR=directory)
+            factory = MagicMock()
+            with self.assertRaisesRegex(AcquisitionFault, 'records for postgresql'):
+                run_production(cfg, daq_factory=factory, spool_dir=directory)
+            factory.assert_not_called()
+
+    def test_startup_rejects_same_type_spool_target_identity_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spool = DurableSpool(Path(directory), 1024 * 1024)
+            old_cfg = configuration(DESTINATION='influxdb', INFLUX_TOKEN='old-token',
+                                    INFLUX_BUCKET='old-bucket')
+            from services.daq_navi.core.production_acquisition import destination_identity
+            spool.set_state('destination', 'influxdb')
+            spool.set_state('destination_identity', destination_identity(old_cfg))
+            spool.append('old-batch', [{'sample_id': 'old'}])
+            spool.close()
+            new_cfg = configuration(DESTINATION='influxdb', INFLUX_TOKEN='new-token',
+                                    INFLUX_BUCKET='new-bucket', SPOOL_DIR=directory)
+            with self.assertRaisesRegex(AcquisitionFault, 'different destination target'):
+                run_production(new_cfg, daq_factory=MagicMock(), spool_dir=directory)
+
+    def test_target_identity_ignores_rotated_credentials(self):
+        from services.daq_navi.core.production_acquisition import destination_identity
+        influx_a = configuration(DESTINATION='influxdb', INFLUX_TOKEN='token-a')
+        influx_b = configuration(DESTINATION='influxdb', INFLUX_TOKEN='token-b')
+        self.assertEqual(destination_identity(influx_a), destination_identity(influx_b))
+        pg_a = configuration(DB_DSN='postgresql://daq:old-secret@db.example:5432/sensors')
+        pg_b = configuration(DB_DSN='postgresql://daq:new-secret@db.example:5432/sensors')
+        self.assertEqual(destination_identity(pg_a), destination_identity(pg_b))
+
     def test_section_longer_than_read_timeout_does_not_fault_before_data_arrives(self):
         cfg = configuration(CLOCK_RATE=1000, SECTION_LENGTH=5000)
         adapter = object.__new__(AdvantechDaq)
@@ -209,7 +298,7 @@ class ProductionAcquisitionTests(unittest.TestCase):
             pipeline.capture([0, 1, 2, 3, 5, 4, 3, 2], end_time_ns=1_700_000_000_000_500_000)
             pipeline.flush_once()
             first = destination.rows[(1_700_000_000_000_000_000, "test-session:0:0")]
-            self.assertEqual((first["raw_voltage"], first["calibrated_value"], first["unit"], first["calibration_revision"]), (0, 0, "kPa", "r1"))
+            self.assertEqual((first["raw_voltage"], first["calibrated_value"], first["unit"]), (0, 0, "kPa"))
             self.assertEqual(len(destination.rows), 8)
             pipeline.close()
 
@@ -223,15 +312,13 @@ class ProductionAcquisitionTests(unittest.TestCase):
             old.close()
             raw = configuration().raw
             raw["CHANNELS"]["0"]["scale"]["high_value"] = 200
-            raw["CHANNELS"]["0"]["scale"]["revision"] = "r2"
             new = ProductionPipeline(DaqNaviConfig(raw), Path(directory), destination,
                                      session_id="00000000-0000-0000-0000-000000000002")
             new.capture([2, 2, 2, 2], end_time_ns=1_700_000_001_000_000_000)
             new.flush_once()
             samples = sorted((row for row in destination.rows.values() if row["channel"] == 0),
                              key=lambda row: row["time_ns"])
-            self.assertEqual([(row["calibrated_value"], row["calibration_revision"])
-                              for row in samples], [(40, "r1"), (80, "r2")])
+            self.assertEqual([row["calibrated_value"] for row in samples], [40, 80])
             new.close()
 
     def test_outage_restart_and_uncertain_commit_replay_once(self):
@@ -373,7 +460,6 @@ class ProductionAcquisitionTests(unittest.TestCase):
     def test_null_metadata_and_boolean_calibration_are_rejected(self):
         cases = (("label", None, "label"),
                  ("unit", None, "unit"),
-                 ("scale.revision", None, "revision"),
                  ("scale.low_voltage", True, "low_voltage"))
         for key, value, error_field in cases:
             with self.subTest(key=key):

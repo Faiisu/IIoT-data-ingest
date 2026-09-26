@@ -12,10 +12,11 @@ Use a Linux host with Docker Engine and the Docker Compose plugin. Physical DAQ 
 cp .env.example .env
 cp deploy/daq-navi/.env.example deploy/daq-navi/.env
 cp deploy/portal/.env.example deploy/portal/.env
+cp services/daq_navi/config.json deploy/daq-navi/config.local.json
 # Edit .env for infrastructure credentials, and the two service files for host ports.
 ```
 
-Review [the saved DAQ configuration](services/daq_navi/config.json) or open the Config Center before collecting data. Its checked-in device, channel, calibration, and destination values are machine-specific examples. Keep database credentials in the saved DAQ configuration consistent with those in `.env`. The service may begin acquisition when it starts if `AUTO_START_ON_STARTUP` is enabled.
+Review the private `deploy/daq-navi/config.local.json` or open the Config Center before collecting data. [The checked-in DAQ JSON](services/daq_navi/config.json) is a starting example; its device, channel, calibration, and destination values are machine-specific. Keep destination credentials in the private config consistent with those in `.env`. The service may begin acquisition when it starts if `AUTO_START_ON_STARTUP` is enabled.
 
 If the TimescaleDB volume already exists, changing `POSTGRES_PASSWORD` in `.env` alone does not change the password of the existing database user. Update that user in PostgreSQL and the DAQ destination configuration together.
 
@@ -100,7 +101,7 @@ The MUSASHI services have their own configuration and process controls. Their Po
 
 ### DAQ control and configuration
 
-The DAQ web service reads and writes [`services/daq_navi/config.json`](services/daq_navi/config.json). The Config Center exposes the hardware span, sensor channel table, per-channel calibration, destination, startup behavior, and runtime status. The API merges and validates changes before saving. Production start validates the saved configuration again. Saving during acquisition can stop and restart the run after confirmation in the UI.
+The DAQ web service reads and writes the private `deploy/daq-navi/config.local.json`, mounted at `/app/services/daq_navi/config.json` in the container. Start it from [the checked-in DAQ example](services/daq_navi/config.json). The Config Center exposes the hardware span, sensor channel table, per-channel calibration, destination, startup behavior, and runtime status. The API merges and validates changes before saving. Production start validates the saved configuration again. Saving during acquisition can stop and restart the run after confirmation in the UI.
 
 `START_CHANNEL` and `CHANNEL_COUNT` select a contiguous hardware input span. `CHANNELS` contains each input's enabled state, label, unit, signal type, voltage range, and linear calibration. For PCI-1716 differential inputs, an even channel starts a pair and reserves the following odd channel. The physical wiring, input mode, and range must agree.
 
@@ -109,11 +110,11 @@ The DAQ web service reads and writes [`services/daq_navi/config.json`](services/
 | `DEVICE_DESCRIPTION`, `DEVICE_ID`, `PROFILE_PATH` | Driver device selection, stored device identifier, and optional DAQNavi profile. |
 | `START_CHANNEL`, `CHANNEL_COUNT`, `CHANNELS` | Hardware span and sensor settings. |
 | `CLOCK_RATE`, `SECTION_LENGTH`, `SECTION_COUNT` | Samples per second per channel, samples per channel per read section, and section count. Continuous production capture requires `SECTION_COUNT=0`. |
-| `DESTINATION`, `DB_*`, `INFLUX_*`, `MQTT_*` | Destination and connection settings. Production mode requires PostgreSQL/TimescaleDB. |
+| `DESTINATION`, `DB_*`, `INFLUX_*`, `MQTT_*` | Destination and connection settings. Production mode supports PostgreSQL/TimescaleDB or InfluxDB 2.x. |
 | `SPOOL_DIR`, `SPOOL_MAX_BYTES` | Persistent production queue and its configured byte limit. |
 | `AUTO_START_ON_STARTUP`, `AUTO_START_MODE` | Whether service startup begins acquisition and which mode to use. |
 
-The root Compose `.env` configures infrastructure credentials and ports. `deploy/daq-navi/.env` and `deploy/portal/.env` configure their host ports. The saved DAQ JSON remains authoritative for acquisition settings and destination credentials. See the [Config Center workflow](services/daq_navi/web/README.md) for channel editing and calibration.
+The root Compose `.env` configures infrastructure credentials and ports. `deploy/daq-navi/.env` and `deploy/portal/.env` configure their host ports. The private DAQ JSON remains authoritative for acquisition settings and destination credentials. Keep it out of Git. See the [Config Center workflow](services/daq_navi/web/README.md) for channel editing and calibration.
 
 ### Production data path
 

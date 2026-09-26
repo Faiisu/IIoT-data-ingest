@@ -12,9 +12,10 @@ Linux is the only supported deployment host for these Compose projects. The DAQ 
 cp .env.example .env
 cp deploy/daq-navi/.env.example deploy/daq-navi/.env
 cp deploy/portal/.env.example deploy/portal/.env
+cp services/daq_navi/config.json deploy/daq-navi/config.local.json
 ```
 
-Edit the root `.env` for TimescaleDB, Mosquitto, and InfluxDB; replace all demo credentials and tokens. The two files under `deploy/` set DAQ and Portal host ports independently. Portal links and polling ports live in `services/portal/config.json`; update its `daq` entry when changing `DAQ_PORT`. Review `services/daq_navi/config.json` for the device, channel span, signal types, input ranges, calibration, and destination. Its saved `DB_DSN` must match the database credentials in the root `.env` and use host `timescaledb` for this Docker network. The checked-in values may not match the installed hardware.
+Edit the root `.env` for TimescaleDB, Mosquitto, and InfluxDB; replace all demo credentials and tokens. The two files under `deploy/` set DAQ and Portal host ports independently. Portal links and polling ports live in `services/portal/config.json`; update its `daq` entry when changing `DAQ_PORT`. Review the private `deploy/daq-navi/config.local.json` for the device, channel span, signal types, input ranges, calibration, and destination. Its saved `DB_DSN` must match the database credentials in the root `.env` and use host `timescaledb` for this Docker network. For InfluxDB, use host `influxdb` on this Docker network, with the organization, bucket, and token from the infrastructure installation. The checked-in values may not match the installed hardware. The private DAQ config is ignored by Git and is mounted into the DAQ container as `/app/services/daq_navi/config.json`.
 
 ## Start and operate
 

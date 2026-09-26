@@ -1,0 +1,217 @@
+"""Operator access control, session lifecycle, and secret redaction for DAQ Navi."""
+
+import os
+import re
+import time
+import hmac
+import hashlib
+import secrets
+from urllib.parse import urlparse
+from typing import Optional, Dict, Any, Tuple
+
+COOKIE_NAME = "daq_session_id"
+DEFAULT_SESSION_TTL_SECONDS = 3600  # 1 hour
+REDACTED_PLACEHOLDER = "********"
+
+
+def hash_password(password: str, salt: Optional[bytes] = None, iterations: int = 100_000) -> str:
+    """Generate a salted PBKDF2-HMAC-SHA256 hash string."""
+    if not salt:
+        salt = secrets.token_bytes(16)
+    derived = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256:{iterations}:{salt.hex()}:{derived.hex()}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Verify password against a stored salted hash using constant-time comparison."""
+    if not stored_hash or not password:
+        return False
+    parts = stored_hash.split(":")
+    if len(parts) != 4 or parts[0] != "pbkdf2_sha256":
+        return False
+    try:
+        iterations = int(parts[1])
+        salt = bytes.fromhex(parts[2])
+        expected = bytes.fromhex(parts[3])
+    except (ValueError, TypeError):
+        return False
+
+    derived = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(derived, expected)
+
+
+def load_auth_secrets(env: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, str], str]:
+    """
+    Load operator credentials and session signing key from environment or secret files.
+    Fails closed if either is missing or empty.
+    Returns: ({username: salted_hash}, session_signing_key)
+    """
+    if env is None:
+        env = os.environ
+
+    # 1. Load password hash
+    password_hash = env.get("DAQ_OPERATOR_HASH", "").strip()
+    hash_file = env.get("DAQ_OPERATOR_HASH_FILE", "").strip()
+    if not password_hash and hash_file and os.path.exists(hash_file):
+        try:
+            with open(hash_file, "r", encoding="utf-8") as f:
+                password_hash = f.read().strip()
+        except Exception:
+            password_hash = ""
+
+    # 2. Load session signing key
+    session_key = env.get("DAQ_SESSION_KEY", "").strip()
+    key_file = env.get("DAQ_SESSION_KEY_FILE", "").strip()
+    if not session_key and key_file and os.path.exists(key_file):
+        try:
+            with open(key_file, "r", encoding="utf-8") as f:
+                session_key = f.read().strip()
+        except Exception:
+            session_key = ""
+
+    # Fail-closed check
+    if not password_hash:
+        raise RuntimeError("Fail-closed: Missing or empty DAQ operator password hash secret.")
+    if not session_key:
+        raise RuntimeError("Fail-closed: Missing or empty DAQ session signing key secret.")
+
+    username = env.get("DAQ_OPERATOR_USER", "operator").strip() or "operator"
+    return ({username: password_hash}, session_key)
+
+
+class SessionStore:
+    """Manages active operator sessions and signed cookies."""
+
+    def __init__(self, signing_key: str, ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS):
+        self.signing_key = signing_key.encode("utf-8") if isinstance(signing_key, str) else signing_key
+        self.ttl_seconds = ttl_seconds
+        self._active_sessions: Dict[str, Dict[str, Any]] = {}
+
+    def _sign(self, session_id: str, timestamp: int) -> str:
+        data = f"{session_id}.{timestamp}".encode("utf-8")
+        return hmac.new(self.signing_key, data, hashlib.sha256).hexdigest()
+
+    def create_session(self, username: str) -> Tuple[str, str]:
+        """Creates a session and returns (session_id, signed_cookie_value)."""
+        session_id = secrets.token_hex(16)
+        now = time.time()
+        expires_at = now + self.ttl_seconds
+        self._active_sessions[session_id] = {
+            "username": username,
+            "created_at": now,
+            "expires_at": expires_at,
+        }
+        sig = self._sign(session_id, int(now))
+        cookie_val = f"{session_id}.{int(now)}.{sig}"
+        return session_id, cookie_val
+
+    def validate_cookie(self, cookie_val: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Validate signed cookie and verify session is active and not expired."""
+        if not cookie_val:
+            return None
+        parts = cookie_val.split(".")
+        if len(parts) != 3:
+            return None
+        session_id, ts_str, signature = parts
+        try:
+            timestamp = int(ts_str)
+        except ValueError:
+            return None
+
+        # Verify HMAC
+        expected_sig = self._sign(session_id, timestamp)
+        if not hmac.compare_digest(signature, expected_sig):
+            return None
+
+        # Check server-side session
+        session = self._active_sessions.get(session_id)
+        if not session:
+            return None
+
+        # Check expiration
+        now = time.time()
+        if now >= session.get("expires_at", 0):
+            self.invalidate_session(cookie_val)
+            return None
+
+        return session
+
+    def invalidate_session(self, cookie_val: Optional[str]) -> None:
+        """Invalidate and remove session from active store."""
+        if not cookie_val:
+            return
+        parts = cookie_val.split(".")
+        if len(parts) >= 1:
+            session_id = parts[0]
+            self._active_sessions.pop(session_id, None)
+
+    def is_valid_session(self, cookie_val: Optional[str]) -> bool:
+        return self.validate_cookie(cookie_val) is not None
+
+
+def redact_dsn_password(dsn: Optional[str]) -> str:
+    """Mask password embedded inside a DSN connection string."""
+    if not dsn:
+        return ""
+    # Matches :password@ in connection strings like postgresql://user:pass@host:port/db
+    return re.sub(r":([^/@:\s]+)@", f":{REDACTED_PLACEHOLDER}@", dsn)
+
+
+def redact_config_secrets(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a deep copy of config with all sensitive secrets masked."""
+    result = dict(config)
+    for key in ("POSTGRES_PASSWORD", "INFLUX_TOKEN", "MQTT_PASSWORD"):
+        if key in result and result[key]:
+            result[key] = REDACTED_PLACEHOLDER
+
+    if "DB_DSN" in result and result["DB_DSN"]:
+        result["DB_DSN"] = redact_dsn_password(result["DB_DSN"])
+
+    return result
+
+
+def merge_preserved_secrets(new_config: Dict[str, Any], old_config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Merge new configuration with existing saved configuration.
+    If a secret is omitted or contains the placeholder, preserve the old value.
+    If explicitly replaced with a new value, use the new value.
+    """
+    merged = dict(new_config)
+    secret_keys = ["POSTGRES_PASSWORD", "INFLUX_TOKEN", "MQTT_PASSWORD"]
+
+    for key in secret_keys:
+        val = merged.get(key)
+        old_val = old_config.get(key, "")
+        if val is None or val == "" or val == REDACTED_PLACEHOLDER:
+            # Preserve old value
+            if old_val:
+                merged[key] = old_val
+            elif key in merged and val == "":
+                # explicitly cleared
+                pass
+
+    # Handle DB_DSN password preservation
+    if "DB_DSN" in merged:
+        new_dsn = merged["DB_DSN"]
+        old_dsn = old_config.get("DB_DSN", "")
+        if REDACTED_PLACEHOLDER in new_dsn and old_dsn:
+            # User submitted masked DSN, restore original password
+            old_match = re.search(r":([^/@:\s]+)@", old_dsn)
+            if old_match:
+                old_pass = old_match.group(1)
+                merged["DB_DSN"] = new_dsn.replace(f":{REDACTED_PLACEHOLDER}@", f":{old_pass}@")
+
+    return merged
+
+
+def is_allowed_origin(origin_or_referer: Optional[str], allowed_origins: list) -> bool:
+    """Validate request Origin or Referer against allowed origins."""
+    if not origin_or_referer:
+        return True  # Direct non-browser clients or same-origin without header
+    clean = origin_or_referer.strip().rstrip("/")
+    for allowed in allowed_origins:
+        if allowed == "*":
+            return True
+        if clean == allowed.rstrip("/"):
+            return True
+    return False

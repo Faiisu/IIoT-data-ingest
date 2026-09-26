@@ -12,10 +12,16 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from services.musashi_ii.app import (
-    app, is_pid_running, terminate_pid, validate_config, write_config,
-    sanitize_error, get_running_process, PID_PATH, MODE_PATH
-)
+try:
+    from services.musashi_ii.app import (
+        app, is_pid_running, terminate_pid, validate_config, write_config,
+        sanitize_error, get_running_process, PID_PATH, MODE_PATH
+    )
+except ModuleNotFoundError:
+    from app import (
+        app, is_pid_running, terminate_pid, validate_config, write_config,
+        sanitize_error, get_running_process, PID_PATH, MODE_PATH
+    )
 
 
 class TestMusashiIIAppHardening(unittest.TestCase):

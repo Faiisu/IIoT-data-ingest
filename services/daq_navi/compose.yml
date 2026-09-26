@@ -1,10 +1,8 @@
-name: iiot-daq-navi
+name: daq-navi
 
 services:
   daq-navi:
-    build:
-      context: ../../services/daq_navi
-      dockerfile: Dockerfile
+    build: .
     container_name: daq_navi
     restart: unless-stopped
     privileged: true
@@ -23,10 +21,8 @@ services:
       - /opt/advantech:/opt/advantech:ro
       - /etc/biobdaq:/etc/biobdaq:ro
       - /var/lib/daq:/var/lib/daq:ro
-      - ./config.local.json:/app/config.json
+      - ./config.json:/app/config.json
       - daq_spool:/var/lib/daq_navi/spool
-    networks:
-      - infrastructure
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8081/api/health', timeout=3)\""]
       interval: 15s
@@ -36,10 +32,3 @@ services:
 
 volumes:
   daq_spool:
-    external: true
-    name: iiot-data-ingest_daq_spool
-
-networks:
-  infrastructure:
-    external: true
-    name: iiot-data-ingest_default

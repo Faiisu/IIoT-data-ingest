@@ -19,6 +19,11 @@ import sqlite3
 import threading
 import time
 import uuid
+import hashlib
+import shlex
+import urllib.error
+import urllib.parse
+import urllib.request
 import zlib
 from datetime import datetime, timezone
 from collections import deque
@@ -49,8 +54,8 @@ def validate_production_config(cfg):
                     "SECTION_COUNT", "SPOOL_MAX_BYTES", "DB_RETENTION_DAYS"):
         if setting in cfg.raw and type(cfg.raw[setting]) is not int:
             raise ValueError(f"{setting} must be an integer")
-    if str(cfg.DESTINATION).lower() != "postgresql":
-        raise ValueError("production destination must be PostgreSQL/TimescaleDB")
+    if str(cfg.DESTINATION).lower() not in ("postgresql", "timescaledb", "influxdb"):
+        raise ValueError("production destination must be PostgreSQL/TimescaleDB or InfluxDB")
     if cfg.MOCKUP_MODE:
         raise ValueError("production acquisition requires MOCKUP_MODE=false")
     if not isinstance(cfg.DEVICE_ID, str) or not cfg.DEVICE_ID.strip():
@@ -71,6 +76,18 @@ def validate_production_config(cfg):
         raise ValueError("DB_PRODUCTION_TABLE must be a simple SQL identifier")
     if cfg.DB_PRODUCTION_TABLE in (cfg.DB_TABLE, cfg.DB_MOCKUP_TABLE):
         raise ValueError("production table must differ from legacy and mockup tables")
+    if cfg.DESTINATION == "influxdb":
+        parsed = urllib.parse.urlsplit(str(cfg.INFLUX_URL))
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError("INFLUX_URL must be a valid HTTP(S) URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("INFLUX_URL must not contain credentials; use INFLUX_TOKEN")
+        if not cfg.INFLUX_ORG.strip() or not cfg.INFLUX_BUCKET.strip() or not cfg.INFLUX_TOKEN.strip():
+            raise ValueError("InfluxDB organization, bucket, and token are required")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cfg.INFLUX_MEASUREMENT):
+            raise ValueError("INFLUX_MEASUREMENT must be a simple measurement name")
+        if "\n" in cfg.DEVICE_ID or "\r" in cfg.DEVICE_ID:
+            raise ValueError("DEVICE_ID cannot contain newline characters for InfluxDB")
     selected_span = range(cfg.START_CHANNEL, cfg.START_CHANNEL + cfg.CHANNEL_COUNT)
     for index, channel in cfg.channels.items():
         if channel.enabled and index not in selected_span:
@@ -110,13 +127,14 @@ def validate_production_config(cfg):
             raise ValueError(f"channel {index} unit is required")
         if not channel.scale_enabled or not channel.has_scale:
             raise ValueError(f"channel {index} calibration must be enabled")
+        if cfg.DESTINATION == "influxdb" and any("\n" in value or "\r" in value for value in (
+                channel.unit, channel.label)):
+            raise ValueError(f"channel {index} InfluxDB tag values cannot contain newline characters")
         scale = raw_channel.get("scale", {})
         if type(scale.get("enabled")) is not bool or any(key not in scale for key in (
-            "low_voltage", "high_voltage", "low_value", "high_value", "revision"
+            "low_voltage", "high_voltage", "low_value", "high_value"
         )):
             raise ValueError(f"channel {index} calibration fields are required")
-        if not isinstance(scale.get("revision"), str) or not channel.calibration_revision:
-            raise ValueError(f"channel {index} calibration revision is required")
         for key in ("low_voltage", "high_voltage", "low_value", "high_value"):
             if type(scale[key]) not in (int, float):
                 raise ValueError(f"channel {index} calibration {key} must be a number")
@@ -127,6 +145,37 @@ def validate_production_config(cfg):
     if not enabled:
         raise ValueError("at least one physical channel must be enabled")
     return tuple(enabled)
+
+
+def destination_identity(cfg):
+    """Opaque, non-secret fingerprint for the durable spool's sink ownership."""
+    if cfg.DESTINATION == "influxdb":
+        parsed = urllib.parse.urlsplit(cfg.INFLUX_URL)
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("INFLUX_URL must not contain credentials; use INFLUX_TOKEN")
+        identity = ["influxdb", cfg.INFLUX_URL.rstrip("/"), cfg.INFLUX_ORG, cfg.INFLUX_BUCKET,
+                    cfg.INFLUX_MEASUREMENT]
+    else:
+        dsn = str(cfg.DB_DSN)
+        parsed = urllib.parse.urlsplit(dsn)
+        if parsed.scheme in ("postgres", "postgresql"):
+            query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+            target = [parsed.hostname or query.get("host", ""), parsed.port or query.get("port", ""),
+                      parsed.username or query.get("user", ""), query.get("dbname", parsed.path.lstrip("/")),
+                      query.get("hostaddr", ""), query.get("service", "")]
+        else:
+            values = {}
+            for token in shlex.split(dsn):
+                if "=" not in token:
+                    raise ValueError("DB_DSN must be a PostgreSQL URL or keyword DSN")
+                key, value = token.split("=", 1)
+                values[key.lower()] = value
+            target = [values.get("host", ""), values.get("port", ""), values.get("user", ""),
+                      values.get("dbname", ""), values.get("service", "")]
+            if not any(target):
+                raise ValueError("DB_DSN must identify a PostgreSQL host or service")
+        identity = ["postgresql", *target, cfg.DB_PRODUCTION_TABLE]
+    return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
 
 
 class DurableSpool:
@@ -326,6 +375,12 @@ class DurableSpool:
             self.conn.commit()
             return gap_id
 
+    def close_open_gaps_for_switch(self, end_ns: int):
+        """Close open intervals at a stopped boundary and queue their final update."""
+        with self._lock:
+            self.conn.execute("UPDATE gaps SET end_ns=MAX(start_ns, ?), delivered=0 WHERE end_ns IS NULL", (end_ns,))
+            self.conn.commit()
+
     def state_value(self, key):
         with self._lock:
             row = self.conn.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
@@ -405,6 +460,11 @@ class ProductionPipeline:
         if prior_active == "1" and prior_last:
             self.spool.open_gap(int(prior_last) + 1_000_000_000 // cfg.CLOCK_RATE,
                                 "process_restart")
+        elif prior_last and not self.spool.conn.execute("SELECT 1 FROM gaps WHERE end_ns IS NULL LIMIT 1").fetchone():
+            last_gap_end = self.spool.conn.execute("SELECT MAX(end_ns) FROM gaps").fetchone()[0]
+            start = max(int(prior_last) + 1_000_000_000 // cfg.CLOCK_RATE,
+                        int(last_gap_end) if last_gap_end is not None else 0)
+            self.spool.open_gap(start, "between_runs")
         self.spool.set_state("acquisition_active", "1")
         self.publish_status()
 
@@ -525,7 +585,6 @@ class ProductionPipeline:
                         "raw_voltage": voltage,
                         "calibrated_value": scaled,
                         "unit": channel.unit,
-                        "calibration_revision": channel.calibration_revision,
                         "provenance": "physical_daq",
                     })
             try:
@@ -586,10 +645,11 @@ class TimescaleProductionDestination:
                     channel SMALLINT NOT NULL, sensor_name TEXT NOT NULL,
                     raw_voltage DOUBLE PRECISION NOT NULL,
                     calibrated_value DOUBLE PRECISION NOT NULL,
-                    unit TEXT NOT NULL, calibration_revision TEXT NOT NULL,
+                    unit TEXT NOT NULL,
                     provenance TEXT NOT NULL,
                     PRIMARY KEY (time, sample_id)
                 )""").format(sql.Identifier(table)))
+                cur.execute(sql.SQL("ALTER TABLE {} DROP COLUMN IF EXISTS calibration_revision").format(sql.Identifier(table)))
                 cur.execute("SELECT create_hypertable(%s, 'time', if_not_exists => TRUE, chunk_time_interval => INTERVAL '1 hour')", (table,))
                 cur.execute(sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} (device_id, channel, time DESC)").format(
                     sql.Identifier("idx_" + table + "_device_channel_time"), sql.Identifier(table)))
@@ -622,11 +682,11 @@ class TimescaleProductionDestination:
                             datetime.fromtimestamp(row["time_ns"] / 1e9, timezone.utc), row["sample_id"],
                             row["session_id"], row["device_id"], row["channel"], row["sensor_name"],
                             row["raw_voltage"], row["calibrated_value"], row["unit"],
-                            row["calibration_revision"], row["provenance"]
+                            row["provenance"]
                         ) for row in rows]
                         statement = sql.SQL("""INSERT INTO {} (
                             time,sample_id,session_id,device_id,channel,sensor_name,
-                            raw_voltage,calibrated_value,unit,calibration_revision,provenance
+                            raw_voltage,calibrated_value,unit,provenance
                         ) VALUES %s ON CONFLICT (time,sample_id) DO NOTHING""").format(sql.Identifier(table))
                         execute_values(cur, statement.as_string(conn), tuples, page_size=2000)
                     if gaps:
@@ -640,6 +700,76 @@ class TimescaleProductionDestination:
         except Exception:
             self._initialized = False
             raise
+
+
+def _lp_escape(value):
+    value = str(value)
+    if "\n" in value or "\r" in value:
+        raise ValueError("InfluxDB tag values cannot contain newline or carriage return")
+    return value.replace("\\", "\\\\").replace(" ", "\\ ").replace(",", "\\,").replace("=", "\\=")
+
+
+def _lp_string(value):
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n") + '"'
+
+
+class InfluxProductionDestination:
+    """InfluxDB 2.x line protocol sink; retries overwrite identical point identities."""
+
+    def __init__(self, cfg, opener=None):
+        self.cfg = cfg
+        self.opener = opener or urllib.request.urlopen
+
+    @staticmethod
+    def points(rows, gaps, measurement):
+        output = []
+        for row in rows:
+            tags = ",".join(f"{key}={_lp_escape(row[key])}" for key in (
+                "device_id", "channel", "session_id", "unit", "provenance"))
+            fields = {
+                "sample_id": _lp_string(row["sample_id"]),
+                "sensor_name": _lp_string(row["sensor_name"]),
+                "raw_voltage": repr(float(row["raw_voltage"])),
+                "calibrated_value": repr(float(row["calibrated_value"])),
+            }
+            encoded = ",".join(f"{_lp_escape(key)}={value}" for key, value in fields.items())
+            output.append(f"{_lp_escape(measurement)},{tags} {encoded} {int(row['time_ns'])}")
+        for gap in gaps:
+            tags = f"gap_id={_lp_escape(gap['gap_id'])}"
+            end = gap["end_ns"]
+            fields = f"start_ns={int(gap['start_ns'])}i,open={str(end is None).lower()},cause={_lp_string(gap['cause'])}"
+            if end is not None:
+                fields += f",end_ns={int(end)}i"
+            output.append(f"daq_acquisition_gaps,{tags} {fields} {int(gap['start_ns'])}")
+        return "\n".join(output)
+
+    def write(self, rows, gaps):
+        payload = self.points(rows, gaps, self.cfg.INFLUX_MEASUREMENT)
+        if not payload:
+            return
+        query = urllib.parse.urlencode({"org": self.cfg.INFLUX_ORG, "bucket": self.cfg.INFLUX_BUCKET, "precision": "ns"})
+        url = f"{self.cfg.INFLUX_URL.rstrip('/')}/api/v2/write?{query}"
+        headers = {"Authorization": f"Token {self.cfg.INFLUX_TOKEN}", "Content-Type": "text/plain; charset=utf-8",
+                   "Accept": "application/json"}
+        current, size = [], 0
+        for line in payload.splitlines():
+            line_size = len(line.encode()) + 1
+            if current and size + line_size > 512 * 1024:
+                self._post(url, "\n".join(current), headers)
+                current, size = [], 0
+            current.append(line)
+            size += line_size
+        if current:
+            self._post(url, "\n".join(current), headers)
+
+    def _post(self, url, payload, headers):
+        request = urllib.request.Request(url, data=payload.encode(), method="POST", headers=headers)
+        try:
+            with self.opener(request, timeout=5) as response:
+                if getattr(response, "status", 204) not in (204, 200):
+                    raise RuntimeError(f"InfluxDB write returned HTTP {response.status}")
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"InfluxDB write returned HTTP {exc.code}") from exc
 
 
 class AdvantechDaq:
@@ -722,7 +852,24 @@ def run_production(cfg, stop_event=None, daq_factory=AdvantechDaq, destination=N
     """Run until stop or fault; recover committed batches on every start."""
     validate_production_config(cfg)
     stop_event = stop_event or threading.Event()
-    destination = destination or TimescaleProductionDestination(cfg)
+    guard_spool = DurableSpool(Path(spool_dir or cfg.SPOOL_DIR), cfg.SPOOL_MAX_BYTES)
+    try:
+        open_gap = guard_spool.conn.execute("SELECT 1 FROM gaps WHERE end_ns IS NULL LIMIT 1").fetchone()
+        pending = guard_spool.pending_batches or guard_spool.pending_gaps() or open_gap
+        prior_destination = guard_spool.state_value("destination") or ("postgresql" if pending else None)
+        prior_identity = guard_spool.state_value("destination_identity")
+        current_identity = destination_identity(cfg)
+        if pending and prior_destination and prior_destination != cfg.DESTINATION:
+            raise AcquisitionFault(f"spool contains records for {prior_destination}; drain them before switching to {cfg.DESTINATION}")
+        if pending and prior_identity and prior_identity != current_identity:
+            raise AcquisitionFault("spool contains records for a different destination target; drain them before changing destination settings")
+        guard_spool.set_state("destination", cfg.DESTINATION)
+        guard_spool.set_state("destination_identity", current_identity)
+    finally:
+        guard_spool.close()
+    if destination is None:
+        destination = (InfluxProductionDestination(cfg) if cfg.DESTINATION == "influxdb"
+                       else TimescaleProductionDestination(cfg))
     pipeline = ProductionPipeline(cfg, Path(spool_dir or cfg.SPOOL_DIR), destination)
     writer_stop = threading.Event()
     writer_deadline = [None]

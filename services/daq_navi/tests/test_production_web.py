@@ -1,5 +1,6 @@
 """Public web API checks for saved production settings and control."""
 
+import os
 import json
 import importlib
 import sqlite3
@@ -10,7 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-web = importlib.import_module('services.daq_navi.web.app')
+try:
+    web = importlib.import_module('services.daq_navi.web.app')
+except ModuleNotFoundError:
+    web = importlib.import_module('web.app')
 
 
 class ProductionWebTests(unittest.TestCase):
@@ -20,6 +24,7 @@ class ProductionWebTests(unittest.TestCase):
         self.path = Path(self.directory.name) / 'config.json'
         source = Path(web.SERVICE_DIR) / 'config.json'
         self.config = json.loads(source.read_text(encoding='utf-8'))
+        self.config['DESTINATION'] = 'postgresql'
         self.config['SPOOL_DIR'] = self.directory.name
         self.path.write_text(json.dumps(self.config), encoding='utf-8')
         self.config_patch = patch.object(web, 'CONFIG_PATH', str(self.path))
@@ -29,7 +34,134 @@ class ProductionWebTests(unittest.TestCase):
             replacement = patch.object(web, name, str(Path(self.directory.name) / name))
             replacement.start()
             self.addCleanup(replacement.stop)
+
+        os.environ['DAQ_OPERATOR_HASH'] = web.auth.hash_password('test-pass')
+        os.environ['DAQ_SESSION_KEY'] = 'test-signing-key-for-existing-suite-32b'
+        self.addCleanup(lambda: os.environ.pop('DAQ_OPERATOR_HASH', None))
+        self.addCleanup(lambda: os.environ.pop('DAQ_SESSION_KEY', None))
+        web.configure_auth(
+            users={'operator': os.environ['DAQ_OPERATOR_HASH']},
+            session_key=os.environ['DAQ_SESSION_KEY'],
+            ttl_seconds=3600
+        )
         self.client = web.app.test_client()
+        _, cookie_val = web.session_store.create_session('operator')
+        self.client.set_cookie(web.COOKIE_NAME, cookie_val)
+
+    def test_influx_samples_api_preserves_stored_metadata(self):
+        config = dict(self.config, DESTINATION='influxdb', INFLUX_URL='http://influx.test:8086',
+                      INFLUX_ORG='org', INFLUX_BUCKET='bucket', INFLUX_TOKEN='token',
+                      INFLUX_MEASUREMENT='daq_telemetry', DEVICE_ID='test-device')
+        csv_data = (',result,table,_time,device_id,channel,session_id,unit,raw_voltage,calibrated_value\n'
+                    ',_result,0,2026-09-26T00:00:00Z,test-device,0,session-a,kPa,1.0,10.0\n'
+                    ',_result,1,2026-09-26T00:00:00Z,test-device,0,session-b,kPa,3.0,30.0\n')
+        response_mock = MagicMock()
+        response_mock.__enter__.return_value.read.return_value = csv_data.encode()
+        requests = []
+        def capture(request, timeout):
+            requests.append(request)
+            return response_mock
+        with patch.object(web, 'read_config', return_value=config), \
+             patch('urllib.request.urlopen', side_effect=capture):
+            response = self.client.get('/api/samples?channel=0')
+        self.assertEqual(response.status_code, 200, response.get_json())
+        points = response.get_json()['points']
+        self.assertEqual([(point['unit'], point['session_id']) for point in points],
+                         [('kPa', 'session-a'), ('kPa', 'session-b')])
+        self.assertEqual([point['calibrated_value'] for point in points], [10.0, 30.0])
+        query = requests[0].data.decode()
+        self.assertIn('aggregateWindow(every: 1s', query)
+        self.assertIn('r.provenance == "physical_daq"', query)
+        self.assertIn('r.device_id == "test-device"', query)
+
+    def test_destination_switch_drains_old_spool_before_rebinding(self):
+        old = dict(self.config, DESTINATION='postgresql', SPOOL_DIR=self.directory.name)
+        new = dict(old, DESTINATION='influxdb')
+        spool = web.DurableSpool(Path(self.directory.name), old['SPOOL_MAX_BYTES'])
+        spool.append('batch', [{'sample_id': 's', 'time_ns': 100}])
+        gap_id = spool.open_gap(50, 'requested_stop')
+        spool.close()
+        with patch.object(web.TimescaleProductionDestination, 'write') as write:
+            web.drain_spool_for_destination_switch(old, new)
+        rows, gaps = write.call_args.args
+        self.assertEqual(rows[0]['sample_id'], 's')
+        self.assertEqual(gaps[0]['gap_id'], gap_id)
+        reopened = web.DurableSpool(Path(self.directory.name), old['SPOOL_MAX_BYTES'])
+        self.assertIsNone(reopened.state_value('destination'))
+        self.assertEqual(reopened.pending_batches, 0)
+        self.assertEqual(reopened.pending_gaps(), [])
+        reopened.close()
+
+    def test_destination_switch_write_failure_keeps_old_spool_pending(self):
+        old = dict(self.config, DESTINATION='postgresql', SPOOL_DIR=self.directory.name)
+        new = dict(old, DESTINATION='influxdb')
+        spool = web.DurableSpool(Path(self.directory.name), old['SPOOL_MAX_BYTES'])
+        spool.set_state('destination', 'postgresql')
+        spool.append('batch', [{'sample_id': 's', 'time_ns': 100}])
+        spool.open_gap(50, 'requested_stop')
+        spool.close()
+        with patch.object(web.TimescaleProductionDestination, 'write', side_effect=OSError('offline')):
+            with self.assertRaisesRegex(OSError, 'offline'):
+                web.drain_spool_for_destination_switch(old, new)
+        reopened = web.DurableSpool(Path(self.directory.name), old['SPOOL_MAX_BYTES'])
+        self.assertEqual(reopened.state_value('destination'), 'postgresql')
+        self.assertEqual(reopened.pending_batches, 1)
+        self.assertEqual(len(reopened.pending_gaps()), 1)
+        reopened.close()
+
+    def test_destination_switch_saves_then_restarts_running_acquisition(self):
+        with patch.object(web, 'get_running_process', side_effect=[(123, 'production'), (None, None)]), \
+             patch.object(web, 'stop_acquisition', return_value={'stopped': True}), \
+             patch.object(web, 'drain_spool_for_destination_switch'), \
+             patch.object(web, 'start_acquisition', return_value={'started': True}) as start:
+            response = self.client.post('/api/config', json={'DESTINATION': 'influxdb'})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.client.get('/api/config').get_json()['DESTINATION'], 'influxdb')
+        start.assert_called_once_with('production')
+
+    def test_same_backend_target_change_drains_but_token_rotation_does_not(self):
+        with patch.object(web, 'get_running_process', return_value=(None, None)), \
+             patch.object(web, 'drain_spool_for_destination_switch') as drain:
+            response = self.client.post('/api/config', json={'DB_DSN': 'postgresql://other-host/testdb'})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        drain.assert_called_once()
+
+        influx_config = dict(self.config, DESTINATION='influxdb', INFLUX_URL='http://influx.test:8086',
+                             INFLUX_ORG='org', INFLUX_BUCKET='bucket', INFLUX_TOKEN='old-token',
+                             INFLUX_MEASUREMENT='daq_telemetry')
+        self.path.write_text(json.dumps(influx_config), encoding='utf-8')
+        with patch.object(web, 'get_running_process', return_value=(None, None)), \
+             patch.object(web, 'drain_spool_for_destination_switch') as drain:
+            rotated = self.client.post('/api/config', json={'INFLUX_TOKEN': 'new-token'})
+        self.assertEqual(rotated.status_code, 200, rotated.get_json())
+        drain.assert_not_called()
+
+    def test_config_rejects_spool_directory_change(self):
+        original = self.path.read_text(encoding='utf-8')
+        response = self.client.post('/api/config', json={'SPOOL_DIR': str(Path(self.directory.name) / 'new-spool')})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('SPOOL_DIR changes are unsupported', response.get_json()['message'])
+        self.assertEqual(self.path.read_text(encoding='utf-8'), original)
+
+    def test_switch_refuses_to_drain_when_saved_config_disagrees_with_spool_owner(self):
+        old = dict(self.config, DESTINATION='influxdb', SPOOL_DIR=self.directory.name,
+                   INFLUX_URL='http://influx.test:8086', INFLUX_ORG='org',
+                   INFLUX_BUCKET='current-bucket', INFLUX_TOKEN='token',
+                   INFLUX_MEASUREMENT='daq_telemetry')
+        changed = dict(old, INFLUX_BUCKET='edited-out-of-band')
+        spool = web.DurableSpool(Path(self.directory.name), old['SPOOL_MAX_BYTES'])
+        spool.set_state('destination', 'influxdb')
+        spool.set_state('destination_identity', web.destination_identity(
+            web.DaqNaviConfig(old, allow_env_overrides=False)))
+        spool.append('pending', [{'sample_id': 's', 'time_ns': 100}])
+        spool.close()
+        with patch.object(web.InfluxProductionDestination, 'write') as write:
+            with self.assertRaisesRegex(web.AcquisitionFault, 'identity does not match'):
+                web.drain_spool_for_destination_switch(changed, dict(changed, INFLUX_BUCKET='next-bucket'))
+        write.assert_not_called()
+        reopened = web.DurableSpool(Path(self.directory.name), old['SPOOL_MAX_BYTES'])
+        self.assertEqual(reopened.pending_batches, 1)
+        reopened.close()
 
     def test_partial_channel_save_preserves_other_settings_and_zero(self):
         with patch.object(web, 'get_running_process', return_value=(None, None)):
@@ -39,8 +171,9 @@ class ProductionWebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         saved = self.client.get('/api/config').get_json()
         self.assertEqual(saved['CHANNELS']['0']['scale']['low_value'], 0.0)
-        self.assertEqual(saved['CHANNELS']['1'], self.config['CHANNELS']['1'])
-        self.assertEqual(saved['DB_DSN'], self.config['DB_DSN'])
+        disk_config = json.loads(self.path.read_text(encoding='utf-8'))
+        self.assertEqual(disk_config['DB_DSN'], self.config['DB_DSN'])
+        self.assertEqual(saved['DB_DSN'], web.auth.redact_dsn_password(self.config['DB_DSN']))
 
     def test_invalid_enabled_channel_is_rejected_without_saving(self):
         before = self.path.read_text(encoding='utf-8')
@@ -242,6 +375,7 @@ class ProductionWebTests(unittest.TestCase):
         updated_payload = {
             'CLOCK_RATE': 1500,
             'CHANNELS': {
+                '1': {'enabled': False},
                 '0': {
                     'enabled': True,
                     'label': 'bearing-vibration',
@@ -692,12 +826,12 @@ class ProductionWebTests(unittest.TestCase):
         self.assertEqual(samples['gaps'][0]['cause'], 'daq_read_timeout')
         self.assertEqual(samples['gaps'][1]['cause'], 'buffer_overflow_dropped_samples')
 
-    def test_samples_query_associates_unit_and_calibration_revision(self):
+    def test_samples_query_associates_unit(self):
         t1 = datetime(2026, 9, 24, 12, 0, 0, tzinfo=timezone.utc)
         t2 = datetime(2026, 9, 24, 12, 0, 1, tzinfo=timezone.utc)
         mock_rows = [
-            (t1, 1.25, 25.0, 'bar', 'rev-2026-v1'),
-            (t2, 2.50, 50.0, 'bar', 'rev-2026-v1'),
+            (t1, 1.25, 25.0, 'bar'),
+            (t2, 2.50, 50.0, 'bar'),
         ]
         mock_cursor = MagicMock()
         mock_cursor.__enter__.return_value = mock_cursor
@@ -706,7 +840,9 @@ class ProductionWebTests(unittest.TestCase):
         mock_conn.__enter__.return_value = mock_conn
         mock_conn.cursor.return_value = mock_cursor
 
-        with patch('psycopg2.connect', return_value=mock_conn):
+        config = dict(self.config, DESTINATION='postgresql')
+        with patch.object(web, 'read_config', return_value=config), \
+             patch('psycopg2.connect', return_value=mock_conn):
             res = self.client.get('/api/samples?channel=1')
 
         self.assertEqual(res.status_code, 200)
@@ -718,13 +854,11 @@ class ProductionWebTests(unittest.TestCase):
         self.assertEqual(points[0]['raw_voltage'], 1.25)
         self.assertEqual(points[0]['calibrated_value'], 25.0)
         self.assertEqual(points[0]['unit'], 'bar')
-        self.assertEqual(points[0]['calibration_revision'], 'rev-2026-v1')
 
         self.assertEqual(points[1]['time'], t2.isoformat())
         self.assertEqual(points[1]['raw_voltage'], 2.50)
         self.assertEqual(points[1]['calibrated_value'], 50.0)
         self.assertEqual(points[1]['unit'], 'bar')
-        self.assertEqual(points[1]['calibration_revision'], 'rev-2026-v1')
 
     def test_samples_channel_validation_and_db_failure(self):
         # Invalid channel arguments
