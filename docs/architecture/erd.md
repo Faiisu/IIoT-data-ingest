@@ -12,7 +12,6 @@ erDiagram
         DOUBLE_PRECISION raw_voltage
         DOUBLE_PRECISION calibrated_value
         TEXT unit
-        TEXT calibration_revision
         TEXT provenance
     }
     daq_production_gaps {

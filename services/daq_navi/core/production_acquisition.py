@@ -634,6 +634,33 @@ class TimescaleProductionDestination:
     def _connect(self):
         return psycopg2.connect(self.cfg.DB_DSN, connect_timeout=3, options="-c statement_timeout=10000")
 
+    def _apply_migrations(self, cur, table):
+        cur.execute("""CREATE TABLE IF NOT EXISTS daq_schema_migrations (
+            version TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            applied_at TIMESTAMPTZ NOT NULL,
+            description TEXT NOT NULL,
+            PRIMARY KEY (version, table_name)
+        )""")
+        migration_version = "0001_retire_calibration_revision"
+        pure_table = table.split(".")[-1].lower()
+        cur.execute(
+            "SELECT 1 FROM daq_schema_migrations WHERE version = %s AND table_name = %s",
+            (migration_version, pure_table)
+        )
+        if not cur.fetchone():
+            cur.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE lower(table_name) = %s AND lower(column_name) = 'calibration_revision'
+            """, (pure_table,))
+            if cur.fetchone():
+                cur.execute(sql.SQL("ALTER TABLE {} DROP COLUMN calibration_revision").format(sql.Identifier(table)))
+            cur.execute(
+                "INSERT INTO daq_schema_migrations (version, table_name, applied_at, description) VALUES (%s, %s, %s, %s)",
+                (migration_version, pure_table, datetime.now(timezone.utc),
+                 "Retire calibration_revision column from production samples")
+            )
+
     def ensure_schema(self):
         table = self.cfg.DB_PRODUCTION_TABLE
         with self._connect() as conn:
@@ -649,7 +676,7 @@ class TimescaleProductionDestination:
                     provenance TEXT NOT NULL,
                     PRIMARY KEY (time, sample_id)
                 )""").format(sql.Identifier(table)))
-                cur.execute(sql.SQL("ALTER TABLE {} DROP COLUMN IF EXISTS calibration_revision").format(sql.Identifier(table)))
+                self._apply_migrations(cur, table)
                 cur.execute("SELECT create_hypertable(%s, 'time', if_not_exists => TRUE, chunk_time_interval => INTERVAL '1 hour')", (table,))
                 cur.execute(sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} (device_id, channel, time DESC)").format(
                     sql.Identifier("idx_" + table + "_device_channel_time"), sql.Identifier(table)))

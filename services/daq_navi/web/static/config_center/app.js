@@ -699,6 +699,7 @@ loadConfig().then(refreshStatus).catch((error) => {
 setInterval(refreshStatus, 5000);
 
 // Change Password Modal handling
+const operatorProfile = $('operator-profile');
 const pwdModal = $('password-modal');
 const btnOpenPwd = $('btn-open-change-password');
 const btnClosePwd = $('btn-close-pwd-modal');
@@ -716,6 +717,7 @@ function showPwdAlert(msg, type) {
 
 function openPasswordModal() {
   if (!pwdModal) return;
+  if (operatorProfile) operatorProfile.open = false;
   pwdModal.classList.remove('hidden');
   if (pwdAlert) {
     pwdAlert.className = 'inline-result hidden';
@@ -737,6 +739,18 @@ function closePasswordModal() {
 if (btnOpenPwd) btnOpenPwd.addEventListener('click', openPasswordModal);
 if (btnClosePwd) btnClosePwd.addEventListener('click', closePasswordModal);
 if (btnCancelPwd) btnCancelPwd.addEventListener('click', closePasswordModal);
+
+if (operatorProfile) {
+  document.addEventListener('click', (e) => {
+    if (!operatorProfile.contains(e.target)) operatorProfile.open = false;
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && operatorProfile.open) {
+      operatorProfile.open = false;
+      operatorProfile.querySelector('summary').focus();
+    }
+  });
+}
 
 if (pwdModal) {
   pwdModal.addEventListener('click', (e) => {
@@ -798,4 +812,3 @@ if (formChangePwd) {
     }
   });
 }
-

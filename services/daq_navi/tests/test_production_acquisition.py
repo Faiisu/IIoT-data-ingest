@@ -13,6 +13,7 @@ from services.daq_navi.core.production_acquisition import (
     DurableSpool,
     ProductionPipeline,
     InfluxProductionDestination,
+    TimescaleProductionDestination,
     run_production,
     validate_production_config,
 )
@@ -640,6 +641,33 @@ class ProductionAcquisitionTests(unittest.TestCase):
             restarted.flush_once()
             self.assertEqual(len(destination.rows), 4)
             restarted.close()
+
+
+class TestTimescaleMigration(unittest.TestCase):
+    def test_apply_migrations_drops_column_when_unapplied_and_records(self):
+        mock_cur = MagicMock()
+        mock_cur.fetchone.side_effect = [
+            None,  # daq_schema_migrations does not have version
+            (1,),  # information_schema.columns has calibration_revision
+        ]
+        cfg = configuration(DB_PRODUCTION_TABLE="daq_production_samples")
+        sink = TimescaleProductionDestination(cfg)
+        sink._apply_migrations(mock_cur, "daq_production_samples")
+
+        executed = [str(call[0][0]) for call in mock_cur.execute.call_args_list]
+        self.assertTrue(any("DROP COLUMN calibration_revision" in s for s in executed))
+        self.assertTrue(any("INSERT INTO daq_schema_migrations" in s for s in executed))
+
+    def test_apply_migrations_skips_destructive_changes_when_already_applied(self):
+        mock_cur = MagicMock()
+        mock_cur.fetchone.return_value = (1,)  # already recorded
+        cfg = configuration(DB_PRODUCTION_TABLE="daq_production_samples")
+        sink = TimescaleProductionDestination(cfg)
+        sink._apply_migrations(mock_cur, "daq_production_samples")
+
+        executed = [str(call[0][0]) for call in mock_cur.execute.call_args_list]
+        self.assertFalse(any("DROP COLUMN" in s for s in executed))
+        self.assertFalse(any("INSERT INTO daq_schema_migrations" in s for s in executed))
 
 
 if __name__ == "__main__":

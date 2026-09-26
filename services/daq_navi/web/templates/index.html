@@ -39,11 +39,18 @@
         <div class="top-actions">
           <span id="last-saved" class="save-state">Loading configuration…</span>
           <button id="save-top" class="button button-primary" type="button" disabled>Save changes</button>
-          <div class="operator-profile">
-            <span class="operator-badge" title="Authenticated Operator">👤 {{ operator_user|default('operator') }}</span>
-            <button id="btn-open-change-password" class="button button-secondary" type="button" title="Change operator password">Change Password</button>
-            <a href="/logout" class="button button-quiet" title="Logout of DAQ Config Center">Logout</a>
-          </div>
+          <details id="operator-profile" class="operator-profile">
+            <summary class="operator-trigger" aria-label="Operator account: {{ operator_user|default('operator') }}">
+              <span class="operator-avatar" aria-hidden="true">{{ (operator_user|default('operator'))[:1]|upper }}</span>
+              <span class="operator-identity"><small>OPERATOR</small><strong>{{ operator_user|default('operator') }}</strong></span>
+              <span class="operator-chevron" aria-hidden="true">⌄</span>
+            </summary>
+            <div class="operator-menu">
+              <div class="operator-menu-heading">Signed in as <strong>{{ operator_user|default('operator') }}</strong></div>
+              <button id="btn-open-change-password" class="operator-menu-item" type="button">Change password <span aria-hidden="true">→</span></button>
+              <a href="/logout" class="operator-menu-item" title="Logout of DAQ Config Center">Log out <span aria-hidden="true">↗</span></a>
+            </div>
+          </details>
         </div>
       </header>
 
@@ -189,4 +196,3 @@
   <script src="/static/config_center/app.js"></script>
 </body>
 </html>
-
