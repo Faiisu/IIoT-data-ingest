@@ -7,8 +7,8 @@ sequenceDiagram
     participant Process as Acquisition process
     participant DAQ as Advantech device
     participant Spool as SQLite spool
-    participant Writer as Database writer
-    participant DB as PostgreSQL/TimescaleDB
+    participant Writer as Destination writer
+    participant Dest as Destination (TimescaleDB / InfluxDB)
 
     Operator->>Web: Start production acquisition
     Web->>Process: Launch with saved configuration
@@ -22,18 +22,18 @@ sequenceDiagram
     loop Pending batches
         Writer->>Spool: Read oldest pending batch
         Spool-->>Writer: Batch records
-        Writer->>DB: Insert production samples
-        alt Database write succeeds
-            DB-->>Writer: Commit success
+        Writer->>Dest: Deliver production samples
+        alt Destination write succeeds
+            Dest-->>Writer: Success response
             Writer->>Spool: Acknowledge batch
-        else Database unavailable/write fails
-            DB-->>Writer: Error
+        else Destination unavailable/write fails
+            Dest-->>Writer: Error
             Note over Writer,Spool: Keep pending batch for retry, within spool capacity
         end
     end
     Process-->>Web: Runtime status
-    Web->>DB: Query recent samples or retention policy
-    DB-->>Web: Query result
+    Web->>Dest: Query recent samples or retention policy
+    Dest-->>Web: Query result
 ```
 
 The exact start and stop behavior depends on the saved configuration and process state. Acquisition gaps are persisted separately; status and sample APIs expose runtime/database information but are not a substitute for checking that expected rows are arriving at the destination.

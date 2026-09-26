@@ -64,7 +64,7 @@ docker compose --env-file deploy/daq-navi/.env -f deploy/daq-navi/compose.yml lo
 
 Use an enabled channel number in the sample URL. In the status response, inspect `status`, `healthy`, `writer_error`, `pending_batches`, and `last_sample_ns`. A queue can grow briefly while the writer catches up; a persistent increase needs investigation. Confirm that recent samples reach the intended table. An API health response alone does not establish end-to-end delivery.
 
-The web interfaces have no built-in authentication. Limit access to a trusted network or add access control before wider exposure. [Linux deployment](DEPLOY_LINUX.md) describes host mounts, port exposure, lifecycle commands, and cutover from the former combined stack. Avoid `docker compose down -v` when preserving database or spool data.
+The DAQ Config Center and its control APIs provide operator authentication when configured. The Portal, MUSASHI II, and MUSASHI IV web interfaces have no built-in authentication. Limit access to a trusted network or add access control before wider exposure. [Linux deployment](DEPLOY_LINUX.md) describes host mounts, port exposure, lifecycle commands, and cutover from the former combined stack. Avoid `docker compose down -v` when preserving database or spool data.
 
 ## Architecture
 
@@ -80,10 +80,11 @@ flowchart LR
     SDK --> Production
     Production --> Spool[(Persistent SQLite spool)]
     Spool --> Writer[Retrying writer]
-    Writer --> PG[(TimescaleDB / PostgreSQL)]
+    Writer -->|configured destination| PG[(TimescaleDB / PostgreSQL)]
+    Writer -->|configured destination| Influx[InfluxDB]
     Mockup -. synthetic samples to configured destination .-> PG
     Mockup -. synthetic samples to configured destination .-> MQTT[Mosquitto]
-    Mockup -. synthetic samples to configured destination .-> Influx[InfluxDB]
+    Mockup -. synthetic samples to configured destination .-> Influx
     MusashiII[MUSASHI II service] -. configured destination .-> Storage[(PostgreSQL, InfluxDB, or SQLite)]
     MusashiIV[MUSASHI IV service] -. configured destination .-> Storage
 ```
@@ -93,8 +94,9 @@ flowchart LR
 | Portal | Static service directory. It links to consoles and polls their status; it does not ingest telemetry. | `services/portal/`, Nginx container |
 | DAQ Config Center and API | Save and validate configuration, scan devices, test destinations, control acquisition, and report status. | `services/daq_navi/web/`, `daq-navi` container |
 | DAQ acquisition | Physical capture or synthetic mockup generation, launched as a child process by the DAQ web service. | `services/daq_navi/core/` |
-| TimescaleDB | Production DAQ sample and gap storage, plus legacy/bootstrap tables. | `timescaledb` container, `tsdb_data` volume |
-| Mosquitto and InfluxDB | Available destinations for configured paths. Starting them does not publish production DAQ samples to them. | `mqtt-broker` and `influxdb` containers |
+| TimescaleDB | Production DAQ sample and gap storage (when selected), plus legacy/bootstrap tables. | `timescaledb` container, `tsdb_data` volume |
+| InfluxDB | Production DAQ destination (when selected) or mockup destination. | `influxdb` container |
+| Mosquitto | Message broker for configured mockup paths; production acquisition does not publish to MQTT. | `mqtt-broker` container |
 | MUSASHI II | Polls a dispenser over serial/RS-232C and writes via its configured PostgreSQL, InfluxDB, or SQLite handler. | `services/musashi_ii/`; separate runtime |
 | MUSASHI IV | Polls a dispenser HTTP API and writes via its configured PostgreSQL, InfluxDB, or SQLite destination; supports mock API data. | `services/musashi_iv/`; separate runtime |
 
@@ -122,10 +124,10 @@ The root Compose `.env` configures infrastructure credentials and ports. `deploy
 1. The acquisition process opens the configured Advantech device through BioDAQ and reads waveform sections from the selected input span.
 2. It timestamps enabled channel samples, retains raw voltage, and applies each channel's calibration to produce an engineering-unit value.
 3. It compresses each batch and commits it to a persistent SQLite spool in the `daq_spool` volume. A committed batch is the local recovery boundary.
-4. A writer sends pending batches to PostgreSQL/TimescaleDB, acknowledges them after successful writes, and retries unacknowledged batches. Stable sample IDs make replay idempotent.
-5. Interruptions are recorded in `daq_production_gaps`. The production table, normally `daq_production_samples`, stores raw and calibrated values, channel and sensor metadata, session ID, and provenance. A retention policy applies to this hypertable.
+4. A writer sends pending batches to the configured destination (PostgreSQL/TimescaleDB or InfluxDB 2.x), acknowledges them after successful writes, and retries unacknowledged batches. Stable sample IDs make replay idempotent.
+5. Interruptions are recorded in `daq_production_gaps` (or the `daq_acquisition_gaps` measurement in InfluxDB). For PostgreSQL/TimescaleDB, the production table, normally `daq_production_samples`, stores raw and calibrated values, channel and sensor metadata, session ID, and provenance, with an active retention policy. For InfluxDB, samples are written via line protocol at nanosecond precision with bucket-managed retention.
 
-The spool limit bounds bytes, not outage duration. A process crash can lose a hardware section that has not yet been committed to the spool. The production writer does not publish those samples to MQTT or InfluxDB. See [production records](docs/architecture/erd.md), [data flow](docs/architecture/data-flow.md), and [acquisition sequence](docs/architecture/sequences/streaming_pipeline.md).
+The spool limit bounds bytes, not outage duration. A process crash can lose a hardware section that has not yet been committed to the spool. The production writer does not publish to MQTT. See [production records](docs/architecture/erd.md), [data flow](docs/architecture/data-flow.md), and [acquisition sequence](docs/architecture/sequences/streaming_pipeline.md).
 
 ### Mockup and other storage paths
 

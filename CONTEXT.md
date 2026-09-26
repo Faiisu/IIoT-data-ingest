@@ -18,4 +18,4 @@ This context covers sensor acquisition through an Advantech DAQ card and the tel
 
 ## System boundaries
 
-Production capture uses Advantech DAQNavi/BioDAQ hardware access available to the Linux host, stores batches in a persistent local SQLite spool, and delivers them to the configured PostgreSQL/TimescaleDB destination. The production sample and gap records are separate from legacy/mockup telemetry tables. Do not describe `daq_telemetry` as a view of production data unless the deployed database explicitly defines such a view.
+Production capture uses Advantech DAQNavi/BioDAQ hardware access available to the Linux host, stores batches in a persistent local SQLite spool, and delivers them to the configured PostgreSQL/TimescaleDB or InfluxDB 2.x destination. The production sample and gap records are separate from legacy/mockup telemetry tables. Do not describe `daq_telemetry` as a view of production data unless the deployed database explicitly defines such a view.

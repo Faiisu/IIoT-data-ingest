@@ -93,7 +93,7 @@ Start production acquisition only after checking the saved configuration, signal
 | Mosquitto | 1883 |
 | InfluxDB | 8086 |
 
-Infrastructure port mappings are in the root `.env`; DAQ and Portal host ports are in their files under `deploy/`. Database and broker ports are published by default; restrict them with host firewall/network rules when they are not needed by other machines. The web interfaces do not provide authentication, so do not expose them to an untrusted network without adding access control.
+Infrastructure port mappings are in the root `.env`; DAQ and Portal host ports are in their files under `deploy/`. Database and broker ports are published by default; restrict them with host firewall/network rules when they are not needed by other machines. The DAQ Config Center provides operator authentication when configured; the Portal, MUSASHI II, and MUSASHI IV web interfaces do not provide authentication, so do not expose them to an untrusted network without adding access control.
 
 ## Optional host setup helpers
 
