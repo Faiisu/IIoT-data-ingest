@@ -488,7 +488,8 @@ async function refreshStatus() {
     running = status.is_running === true;
     const state = status.status || (running ? 'running' : 'stopped');
     $('side-status').textContent = titleCase(state);
-    $('side-detail').textContent = status.writer_error || status.fault || 'DAQ service :8081';
+    const sideDetail = $('side-detail');
+    if (sideDetail) sideDetail.textContent = status.writer_error || status.fault || 'DAQ service :8081';
     $('run-state').textContent = titleCase(state);
     $('mode-pill').textContent = titleCase(status.mode || 'stopped');
     $('run-dot').className = `dot ${state === 'running' ? 'online' : state === 'buffering' ? 'warning' : state === 'faulted' ? 'fault' : ''}`;
@@ -518,7 +519,8 @@ async function refreshStatus() {
     setPendingTrend('↑ —', '↓ —', 'Rate unavailable');
     running = false;
     $('side-status').textContent = 'Service unavailable';
-    $('side-detail').textContent = 'Could not reach DAQ API';
+    const sideDetail = $('side-detail');
+    if (sideDetail) sideDetail.textContent = 'Could not reach DAQ API';
     $('run-state').textContent = 'API unavailable';
     $('run-dot').className = 'dot fault';
     $('side-dot').className = 'dot fault';
