@@ -36,7 +36,15 @@
     <main class="main-content">
       <header class="topbar">
         <div class="breadcrumbs">SYSTEMS <span>/</span> DAQ <span>/</span> CONFIGURATION</div>
-        <div class="top-actions"><span id="last-saved" class="save-state">Loading configuration…</span><button id="save-top" class="button button-primary" type="button" disabled>Save changes</button></div>
+        <div class="top-actions">
+          <span id="last-saved" class="save-state">Loading configuration…</span>
+          <button id="save-top" class="button button-primary" type="button" disabled>Save changes</button>
+          <div class="operator-profile">
+            <span class="operator-badge" title="Authenticated Operator">👤 {{ operator_user|default('operator') }}</span>
+            <button id="btn-open-change-password" class="button button-secondary" type="button" title="Change operator password">Change Password</button>
+            <a href="/logout" class="button button-quiet" title="Logout of DAQ Config Center">Logout</a>
+          </div>
+        </div>
       </header>
 
       <section id="overview" class="page-heading">
@@ -144,6 +152,41 @@
       <footer class="page-footer"><span>MDDP DATA INGESTION</span><span>DAQ SERVICE & CONFIG CENTER <b>:8081</b></span></footer>
     </main>
   </div>
+
+  <!-- Change Password Modal Dialog -->
+  <div id="password-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modal-title">Change Operator Password</h3>
+        <button id="btn-close-pwd-modal" class="modal-close" type="button" aria-label="Close dialog">&times;</button>
+      </div>
+      <form id="change-password-form" autocomplete="off">
+        <div class="modal-body">
+          <div id="pwd-modal-alert" class="inline-result hidden" role="status" aria-live="polite"></div>
+          <div class="field-grid one">
+            <label class="field">
+              <span>Current Password</span>
+              <input id="pwd-current" type="password" required autocomplete="current-password">
+            </label>
+            <label class="field">
+              <span>New Password (min. 8 characters)</span>
+              <input id="pwd-new" type="password" minlength="8" required autocomplete="new-password">
+            </label>
+            <label class="field">
+              <span>Confirm New Password</span>
+              <input id="pwd-confirm" type="password" minlength="8" required autocomplete="new-password">
+            </label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="btn-cancel-pwd" class="button button-quiet" type="button">Cancel</button>
+          <button id="btn-submit-pwd" class="button button-primary" type="submit">Update Password</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <script src="/static/config_center/app.js"></script>
 </body>
 </html>
+

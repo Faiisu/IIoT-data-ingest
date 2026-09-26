@@ -344,6 +344,115 @@ class TestAccessControl(unittest.TestCase):
         res = self.client.get('/api/health', headers={'Origin': 'http://localhost:8080'})
         self.assertEqual(res.headers.get('Access-Control-Allow-Origin'), 'http://localhost:8080')
 
+    # =========================================================================
+    # Group I: Password Change Lifecycle & Persistence
+    # =========================================================================
+
+    def test_change_password_requires_authentication(self):
+        """PWD-01: Anonymous request to /api/auth/change-password returns 401."""
+        res = self.client.post('/api/auth/change-password', json={
+            'current_password': self.operator_password,
+            'new_password': 'BrandNewPassword123!',
+            'confirm_password': 'BrandNewPassword123!'
+        })
+        self.assertEqual(res.status_code, 401)
+
+    def test_change_password_validation_errors(self):
+        """PWD-02: Missing fields, short passwords, or mismatched confirmation return 400."""
+        client = self._authenticated_client()
+
+        # Missing current password
+        res = client.post('/api/auth/change-password', json={
+            'current_password': '',
+            'new_password': 'ValidNewPassword123!',
+            'confirm_password': 'ValidNewPassword123!'
+        })
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('Current password is required', res.get_json()['message'])
+
+        # New password too short (< 8 chars)
+        res = client.post('/api/auth/change-password', json={
+            'current_password': self.operator_password,
+            'new_password': 'short',
+            'confirm_password': 'short'
+        })
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('at least 8 characters', res.get_json()['message'])
+
+        # Confirmation mismatch
+        res = client.post('/api/auth/change-password', json={
+            'current_password': self.operator_password,
+            'new_password': 'ValidNewPassword123!',
+            'confirm_password': 'DifferentPassword123!'
+        })
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('do not match', res.get_json()['message'])
+
+        # Same as current
+        res = client.post('/api/auth/change-password', json={
+            'current_password': self.operator_password,
+            'new_password': self.operator_password,
+            'confirm_password': self.operator_password
+        })
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('must be different from current', res.get_json()['message'])
+
+    def test_change_password_invalid_current_password(self):
+        """PWD-03: Wrong current password returns 400."""
+        client = self._authenticated_client()
+        res = client.post('/api/auth/change-password', json={
+            'current_password': 'WrongPassword!',
+            'new_password': 'BrandNewPassword123!',
+            'confirm_password': 'BrandNewPassword123!'
+        })
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('Incorrect current password', res.get_json()['message'])
+
+    def test_change_password_success_and_persistence(self):
+        """PWD-04: Successful password change updates memory, file, and allows login."""
+        hash_file = Path(self.directory.name) / 'operator_hash'
+        with patch.dict(os.environ, {'DAQ_OPERATOR_HASH_FILE': str(hash_file)}):
+            client = self._authenticated_client()
+            new_pwd = 'BrandNewPassword123!'
+            res = client.post('/api/auth/change-password', json={
+                'current_password': self.operator_password,
+                'new_password': new_pwd,
+                'confirm_password': new_pwd
+            })
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.get_json()['status'], 'ok')
+
+            # Verify persisted file content
+            self.assertTrue(hash_file.exists())
+            persisted_hash = hash_file.read_text(encoding='utf-8').strip()
+            self.assertTrue(persisted_hash.startswith('pbkdf2_sha256:'))
+            self.assertTrue(auth.verify_password(new_pwd, persisted_hash))
+
+            # Old password can no longer log in
+            login_old = self._login(username=self.operator_user, password=self.operator_password)
+            self.assertEqual(login_old.status_code, 401)
+
+            # New password logs in successfully
+            login_new = self._login(username=self.operator_user, password=new_pwd)
+            self.assertEqual(login_new.status_code, 302)
+
+    def test_hash_file_precedence_in_load_auth_secrets(self):
+        """PWD-05: Hash file takes precedence over DAQ_OPERATOR_HASH in env."""
+        hash_file = Path(self.directory.name) / 'custom_operator_hash'
+        custom_pwd = 'FileProvidedPassword999!'
+        file_hash = auth.hash_password(custom_pwd)
+        hash_file.write_text(file_hash, encoding='utf-8')
+
+        users, key = auth.load_auth_secrets(env={
+            'DAQ_OPERATOR_USER': 'admin',
+            'DAQ_OPERATOR_HASH': self.password_hash,  # older env hash
+            'DAQ_OPERATOR_HASH_FILE': str(hash_file),
+            'DAQ_SESSION_KEY': self.session_key
+        })
+        self.assertEqual(users['admin'], file_hash)
+        self.assertTrue(auth.verify_password(custom_pwd, users['admin']))
+
 
 if __name__ == '__main__':
     unittest.main()
+

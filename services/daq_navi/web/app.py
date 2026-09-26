@@ -541,9 +541,57 @@ def logout():
     return resp
 
 
+@app.route('/api/auth/change-password', methods=['POST'])
+def change_password():
+    session = get_current_session()
+    if session is None and session_store is not None:
+        return jsonify({'status': 'error', 'error': 'Unauthorized', 'message': 'Unauthorized'}), 401
+
+    data = request.get_json(silent=True) or request.form
+    if not data:
+        return jsonify({'status': 'error', 'error': 'Invalid request body', 'message': 'Invalid request body'}), 400
+
+    current_password = data.get('current_password') or ''
+    new_password = data.get('new_password') or ''
+    confirm_password = data.get('confirm_password') or ''
+
+    if not current_password:
+        return jsonify({'status': 'error', 'error': 'Current password is required', 'message': 'Current password is required'}), 400
+
+    if not new_password or len(new_password) < 8:
+        return jsonify({'status': 'error', 'error': 'New password must be at least 8 characters long', 'message': 'New password must be at least 8 characters long'}), 400
+
+    if new_password != confirm_password:
+        return jsonify({'status': 'error', 'error': 'New password and confirmation do not match', 'message': 'New password and confirmation do not match'}), 400
+
+    if current_password == new_password:
+        return jsonify({'status': 'error', 'error': 'New password must be different from current password', 'message': 'New password must be different from current password'}), 400
+
+    username = session.get('username', 'operator') if session else 'operator'
+    stored_hash = operator_users.get(username) if operator_users else None
+
+    if not stored_hash or not auth.verify_password(current_password, stored_hash):
+        return jsonify({'status': 'error', 'error': 'Incorrect current password', 'message': 'Incorrect current password'}), 400
+
+    new_hash = auth.hash_password(new_password)
+    try:
+        auth.save_operator_hash(new_hash)
+    except Exception as exc:
+        app.logger.error("Failed to persist updated operator password hash: %s", exc)
+        return jsonify({'status': 'error', 'error': str(exc), 'message': f'Failed to persist password: {exc}'}), 500
+
+    if operator_users is not None:
+        operator_users[username] = new_hash
+
+    app.logger.info("Operator '%s' successfully changed password.", username)
+    return jsonify({'status': 'ok', 'message': 'Password changed successfully'})
+
+
 @app.route('/')
 def home():
-    return render_template('index.html')
+    session = get_current_session()
+    operator_user = session.get('username', 'operator') if session else 'operator'
+    return render_template('index.html', operator_user=operator_user)
 
 @app.route('/favicon.ico')
 def favicon():

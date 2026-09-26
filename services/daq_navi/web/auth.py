@@ -49,15 +49,21 @@ def load_auth_secrets(env: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, s
     if env is None:
         env = os.environ
 
-    # 1. Load password hash
-    password_hash = env.get("DAQ_OPERATOR_HASH", "").strip()
+    # 1. Load password hash: check hash_file first if defined/exists, else fallback to env
+    password_hash = ""
     hash_file = env.get("DAQ_OPERATOR_HASH_FILE", "").strip()
-    if not password_hash and hash_file and os.path.exists(hash_file):
+    if hash_file and os.path.exists(hash_file):
         try:
             with open(hash_file, "r", encoding="utf-8") as f:
-                password_hash = f.read().strip()
+                content = f.read().strip()
+                if content:
+                    password_hash = content
         except Exception:
             password_hash = ""
+
+    if not password_hash:
+        password_hash = env.get("DAQ_OPERATOR_HASH", "").strip()
+
 
     # 2. Load session signing key
     session_key = env.get("DAQ_SESSION_KEY", "").strip()
@@ -77,6 +83,30 @@ def load_auth_secrets(env: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, s
 
     username = env.get("DAQ_OPERATOR_USER", "operator").strip() or "operator"
     return ({username: password_hash}, session_key)
+
+
+def save_operator_hash(hash_str: str, file_path: Optional[str] = None) -> str:
+    """
+    Atomically save password hash to a persistent file.
+    If file_path is omitted, uses DAQ_OPERATOR_HASH_FILE or default persistent spool location.
+    """
+    if not file_path:
+        file_path = os.environ.get("DAQ_OPERATOR_HASH_FILE", "").strip()
+    if not file_path:
+        spool_dir = "/var/lib/daq_navi/spool"
+        if os.path.isdir(spool_dir):
+            file_path = os.path.join(spool_dir, "operator_hash")
+        else:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            file_path = os.path.join(base_dir, ".operator_hash")
+
+    resolved_path = os.path.abspath(file_path)
+    os.makedirs(os.path.dirname(resolved_path), exist_ok=True)
+    temp_path = f"{resolved_path}.tmp.{secrets.token_hex(4)}"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        f.write(hash_str.strip() + "\n")
+    os.replace(temp_path, resolved_path)
+    return resolved_path
 
 
 class SessionStore:
@@ -215,3 +245,21 @@ def is_allowed_origin(origin_or_referer: Optional[str], allowed_origins: list) -
         if clean == allowed.rstrip("/"):
             return True
     return False
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="DAQ Navi operator credential utility")
+    parser.add_argument("--hash", help="Generate PBKDF2 hash for the given plain text password")
+    parser.add_argument("--set-file", help="File path to save the hash to")
+    parser.add_argument("--password", help="Password to hash and write when used with --set-file")
+    args = parser.parse_args()
+
+    if args.hash:
+        print(hash_password(args.hash))
+    elif args.set_file and args.password:
+        h = hash_password(args.password)
+        saved_to = save_operator_hash(h, args.set_file)
+        print(f"Password hash saved to {saved_to}")
+    else:
+        parser.print_help()
