@@ -140,7 +140,7 @@ DAQ mockup acquisition generates synthetic values and uses its configured destin
 | `services/daq_navi/web/` | Config Center, REST API, and process control. |
 | `services/daq_navi/core/` | DAQ configuration loading, physical capture, spool, writer, and mockup acquisition. |
 | `services/musashi_ii/`, `services/musashi_iv/` | Independent dispenser ingestion services. |
-| `shared/`, `config/` | Shared code and Mosquitto configuration. |
+| `config/` | Mosquitto configuration. |
 | `scripts/sql/` | Legacy/bootstrap database schema. |
 | `deploy/linux/`, `scripts/setup_wizard.sh` | Optional Linux host setup helpers. |
 | `CONTEXT.md`, `docs/adr/`, `docs/architecture/` | Domain language, decisions, and detailed diagrams. |

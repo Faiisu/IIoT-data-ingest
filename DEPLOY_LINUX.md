@@ -82,4 +82,4 @@ Infrastructure port mappings are in the root `.env`; DAQ and Portal host ports a
 
 ## Optional host setup helpers
 
-`deploy/linux/install_deps.sh`, `scripts/setup_wizard.sh`, `deploy/linux/setup_systemd.sh`, and `deploy/linux/setup_systemd_docker.sh` are host setup helpers. Inspect the selected script before running it and use only the helper matching your installation. The systemd helpers require administrator privileges. They are not required for a manual `docker compose up` deployment.
+`deploy/linux/install_deps.sh` and `scripts/setup_wizard.sh` are host setup helpers. Inspect the selected script before running it and use only the helper matching your installation. They are not required for a manual `docker compose up` deployment.
